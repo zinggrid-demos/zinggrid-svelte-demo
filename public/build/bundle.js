@@ -3070,10 +3070,10 @@ var app = (function () {
     			t = space();
     			zg_column1 = element("zg-column");
     			set_custom_element_data(zg_column0, "index", "titleChanged");
-    			add_location(zg_column0, file$8, 59, 4, 1337);
+    			add_location(zg_column0, file$8, 59, 4, 1344);
     			set_custom_element_data(zg_column1, "index", "genreChanged");
-    			add_location(zg_column1, file$8, 60, 4, 1376);
-    			add_location(zg_colgroup, file$8, 58, 3, 1319);
+    			add_location(zg_column1, file$8, 60, 4, 1383);
+    			add_location(zg_colgroup, file$8, 58, 3, 1326);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, zg_colgroup, anchor);
@@ -3111,10 +3111,10 @@ var app = (function () {
     			t = space();
     			zg_column1 = element("zg-column");
     			set_custom_element_data(zg_column0, "index", "title");
-    			add_location(zg_column0, file$8, 54, 4, 1228);
+    			add_location(zg_column0, file$8, 54, 4, 1235);
     			set_custom_element_data(zg_column1, "index", "genre");
-    			add_location(zg_column1, file$8, 55, 4, 1260);
-    			add_location(zg_colgroup, file$8, 53, 3, 1210);
+    			add_location(zg_column1, file$8, 55, 4, 1267);
+    			add_location(zg_colgroup, file$8, 53, 3, 1217);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, zg_colgroup, anchor);
@@ -3195,7 +3195,7 @@ var app = (function () {
     			set_custom_element_data(zing_grid, "layout", "row");
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "viewport-stop", "");
-    			set_custom_element_data(zing_grid, "pager", "");
+    			set_custom_element_data(zing_grid, "pager", true);
     			set_custom_element_data(zing_grid, "page-size", "5");
     			add_location(zing_grid, file$8, 41, 1, 978);
     			attr_dev(div, "class", "Grid-wrapper");
@@ -3536,15 +3536,15 @@ var app = (function () {
     		c: function create() {
     			div = element("div");
     			zing_grid = element("zing-grid");
-    			set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[0]);
+    			set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[1]);
     			set_custom_element_data(zing_grid, "caption", "Shows");
     			set_custom_element_data(zing_grid, "editor", "");
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
-    			set_custom_element_data(zing_grid, "loading", "");
+    			set_custom_element_data(zing_grid, "loading", true);
     			set_custom_element_data(zing_grid, "loading-text", "Loading (delayed by 2 seconds)");
-    			add_location(zing_grid, file$6, 29, 1, 591);
+    			add_location(zing_grid, file$6, 31, 1, 680);
     			attr_dev(div, "class", "Grid-wrapper");
-    			add_location(div, file$6, 28, 0, 563);
+    			add_location(div, file$6, 30, 0, 652);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -3552,16 +3552,18 @@ var app = (function () {
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
     			append_dev(div, zing_grid);
+    			/*zing_grid_binding*/ ctx[2](zing_grid);
     		},
     		p: function update(ctx, [dirty]) {
-    			if (dirty & /*dataSet*/ 1) {
-    				set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[0]);
+    			if (dirty & /*dataSet*/ 2) {
+    				set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[1]);
     			}
     		},
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div);
+    			/*zing_grid_binding*/ ctx[2](null);
     		}
     	};
 
@@ -3579,6 +3581,7 @@ var app = (function () {
     function instance$6($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('Fetch', slots, []);
+    	let grid = null;
     	let dataSet = undefined;
 
     	// Delay for ms milliseconds
@@ -3587,36 +3590,45 @@ var app = (function () {
     	// Fetch the dataset
     	async function getData() {
     		try {
+    			grid.setAttribute('loading', '');
     			const res = await fetch('./shows.json');
     			const data = await res.json();
 
-    			// purposely timeout so the loading screen displays longer
+    			// purposely delay so the loading screen displays longer
     			await delay(2000);
 
-    			$$invalidate(0, dataSet = JSON.stringify(data.shows));
+    			$$invalidate(1, dataSet = JSON.stringify(data.shows));
     		} catch(err) {
     			console.log(err);
     		}
     	}
 
-    	onMount(() => getData());
+    	onMount(() => grid.executeOnLoad(() => setTimeout(getData, 0)));
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
     		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1.warn(`<Fetch> was created with unknown prop '${key}'`);
     	});
 
-    	$$self.$capture_state = () => ({ onMount, dataSet, delay, getData });
+    	function zing_grid_binding($$value) {
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			grid = $$value;
+    			$$invalidate(0, grid);
+    		});
+    	}
+
+    	$$self.$capture_state = () => ({ onMount, grid, dataSet, delay, getData });
 
     	$$self.$inject_state = $$props => {
-    		if ('dataSet' in $$props) $$invalidate(0, dataSet = $$props.dataSet);
+    		if ('grid' in $$props) $$invalidate(0, grid = $$props.grid);
+    		if ('dataSet' in $$props) $$invalidate(1, dataSet = $$props.dataSet);
     	};
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	return [dataSet];
+    	return [grid, dataSet, zing_grid_binding];
     }
 
     class Fetch extends SvelteComponentDev {
@@ -3666,18 +3678,18 @@ var app = (function () {
     			button = element("button");
     			button.textContent = "Set Data";
     			set_custom_element_data(zing_grid, "editor", "");
-    			set_custom_element_data(zing_grid, "pager", "");
+    			set_custom_element_data(zing_grid, "pager", true);
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			add_location(zing_grid, file$5, 29, 1, 632);
-    			add_location(br0, file$5, 36, 2, 747);
+    			add_location(br0, file$5, 36, 2, 754);
     			attr_dev(textarea_1, "cols", "50");
     			attr_dev(textarea_1, "rows", "12");
     			attr_dev(textarea_1, "spellcheck", "false");
-    			add_location(textarea_1, file$5, 37, 2, 755);
-    			add_location(br1, file$5, 38, 2, 839);
-    			add_location(button, file$5, 39, 2, 847);
+    			add_location(textarea_1, file$5, 37, 2, 762);
+    			add_location(br1, file$5, 38, 2, 846);
+    			add_location(button, file$5, 39, 2, 854);
     			attr_dev(div0, "class", "Sidebar-wrapper");
-    			add_location(div0, file$5, 35, 1, 715);
+    			add_location(div0, file$5, 35, 1, 722);
     			attr_dev(div1, "class", "GridSidebar-wrapper");
     			add_location(div1, file$5, 28, 0, 597);
     		},
@@ -3814,14 +3826,12 @@ var app = (function () {
     	let p;
     	let t2;
     	let textarea;
-    	let textarea_onchange_value;
     	let t3;
     	let br0;
     	let t4;
     	let label0;
     	let t6;
     	let input0;
-    	let input0_onchange_value;
     	let t7;
     	let br1;
     	let t8;
@@ -3909,65 +3919,64 @@ var app = (function () {
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "page-size", "5");
     			set_custom_element_data(zing_grid, "page-size-options", "2,5,15,25,50");
-    			add_location(zing_grid, file$4, 38, 1, 783);
-    			add_location(p, file$4, 47, 2, 983);
+    			add_location(zing_grid, file$4, 38, 1, 785);
+    			add_location(p, file$4, 47, 2, 985);
     			attr_dev(textarea, "name", "ds");
     			attr_dev(textarea, "cols", "50");
     			attr_dev(textarea, "rows", "12");
     			textarea.value = /*stringData*/ ctx[4];
-    			attr_dev(textarea, "onchange", textarea_onchange_value = /*func*/ ctx[6]);
-    			add_location(textarea, file$4, 48, 2, 1019);
-    			add_location(br0, file$4, 50, 2, 1133);
-    			attr_dev(label0, "htmlfor", "pager-toggle");
-    			add_location(label0, file$4, 52, 2, 1145);
+    			attr_dev(textarea, "spellcheck", false);
+    			add_location(textarea, file$4, 48, 2, 1021);
+    			add_location(br0, file$4, 50, 2, 1153);
+    			attr_dev(label0, "for", "pager-toggle");
+    			add_location(label0, file$4, 52, 2, 1165);
     			attr_dev(input0, "id", "pager-toggle");
     			attr_dev(input0, "type", "checkbox");
     			input0.checked = /*pagerOn*/ ctx[2];
-    			attr_dev(input0, "onchange", input0_onchange_value = /*func_1*/ ctx[7]);
-    			add_location(input0, file$4, 53, 2, 1198);
-    			add_location(br1, file$4, 55, 2, 1311);
-    			attr_dev(label1, "htmlfor", "data-select");
-    			add_location(label1, file$4, 57, 2, 1321);
+    			add_location(input0, file$4, 53, 2, 1214);
+    			add_location(br1, file$4, 55, 2, 1328);
+    			attr_dev(label1, "for", "data-select");
+    			add_location(label1, file$4, 57, 2, 1338);
     			option0.__value = "0";
     			option0.value = option0.__value;
-    			add_location(option0, file$4, 59, 3, 1443);
+    			add_location(option0, file$4, 59, 3, 1456);
     			option1.__value = "1";
     			option1.value = option1.__value;
-    			add_location(option1, file$4, 60, 3, 1481);
+    			add_location(option1, file$4, 60, 3, 1494);
     			attr_dev(select0, "id", "data-select");
-    			add_location(select0, file$4, 58, 2, 1376);
-    			add_location(br2, file$4, 62, 2, 1527);
-    			attr_dev(label2, "htmlfor", "caption-text");
-    			add_location(label2, file$4, 64, 2, 1537);
+    			add_location(select0, file$4, 58, 2, 1389);
+    			add_location(br2, file$4, 62, 2, 1540);
+    			attr_dev(label2, "for", "caption-text");
+    			add_location(label2, file$4, 64, 2, 1550);
     			attr_dev(input1, "id", "caption-text");
     			attr_dev(input1, "type", "text");
     			attr_dev(input1, "placeholder", "Caption");
     			input1.value = /*caption*/ ctx[1];
-    			add_location(input1, file$4, 65, 2, 1594);
-    			add_location(br3, file$4, 67, 2, 1722);
-    			attr_dev(label3, "htmlfor", "theme-text");
-    			add_location(label3, file$4, 69, 2, 1732);
+    			add_location(input1, file$4, 65, 2, 1603);
+    			add_location(br3, file$4, 67, 2, 1730);
+    			attr_dev(label3, "for", "theme-text");
+    			add_location(label3, file$4, 69, 2, 1740);
     			option2.__value = "default";
     			option2.value = option2.__value;
-    			add_location(option2, file$4, 71, 3, 1869);
+    			add_location(option2, file$4, 71, 3, 1873);
     			option3.__value = "android";
     			option3.value = option3.__value;
-    			add_location(option3, file$4, 72, 3, 1913);
+    			add_location(option3, file$4, 72, 3, 1917);
     			option4.__value = "ios";
     			option4.value = option4.__value;
-    			add_location(option4, file$4, 73, 3, 1957);
+    			add_location(option4, file$4, 73, 3, 1961);
     			option5.__value = "dark";
     			option5.value = option5.__value;
-    			add_location(option5, file$4, 74, 3, 1993);
+    			add_location(option5, file$4, 74, 3, 1997);
     			option6.__value = "black";
     			option6.value = option6.__value;
-    			add_location(option6, file$4, 75, 3, 2031);
+    			add_location(option6, file$4, 75, 3, 2035);
     			attr_dev(select1, "id", "theme-text");
-    			add_location(select1, file$4, 70, 2, 1785);
+    			add_location(select1, file$4, 70, 2, 1789);
     			attr_dev(div0, "class", "Sidebar-wrapper");
-    			add_location(div0, file$4, 46, 1, 951);
+    			add_location(div0, file$4, 46, 1, 953);
     			attr_dev(div1, "class", "GridSidebar-wrapper");
-    			add_location(div1, file$4, 37, 0, 748);
+    			add_location(div1, file$4, 37, 0, 750);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -4016,8 +4025,10 @@ var app = (function () {
 
     			if (!mounted) {
     				dispose = [
+    					listen_dev(textarea, "input", /*input_handler*/ ctx[6], false, false, false),
+    					listen_dev(input0, "change", /*change_handler*/ ctx[7], false, false, false),
     					listen_dev(select0, "change", /*setData*/ ctx[5], false, false, false),
-    					listen_dev(input1, "change", /*change_handler*/ ctx[8], false, false, false),
+    					listen_dev(input1, "input", /*input_handler_1*/ ctx[8], false, false, false),
     					listen_dev(select1, "change", /*change_handler_1*/ ctx[9], false, false, false)
     				];
 
@@ -4045,16 +4056,8 @@ var app = (function () {
     				prop_dev(textarea, "value", /*stringData*/ ctx[4]);
     			}
 
-    			if (dirty & /*stringData*/ 16 && textarea_onchange_value !== (textarea_onchange_value = /*func*/ ctx[6])) {
-    				attr_dev(textarea, "onchange", textarea_onchange_value);
-    			}
-
     			if (dirty & /*pagerOn*/ 4) {
     				prop_dev(input0, "checked", /*pagerOn*/ ctx[2]);
-    			}
-
-    			if (dirty & /*pagerOn*/ 4 && input0_onchange_value !== (input0_onchange_value = /*func_1*/ ctx[7])) {
-    				attr_dev(input0, "onchange", input0_onchange_value);
     			}
 
     			if (dirty & /*dataIndex*/ 1) {
@@ -4106,7 +4109,7 @@ var app = (function () {
     		]
     	];
 
-    	let dataIndex = 1;
+    	let dataIndex = '1';
     	let caption = 'Change Me Please!';
     	let pagerOn = true;
     	let theme = 'default';
@@ -4125,9 +4128,9 @@ var app = (function () {
     		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<OneWay> was created with unknown prop '${key}'`);
     	});
 
-    	const func = ev => $$invalidate(4, stringData = ev.target.value);
-    	const func_1 = ev => $$invalidate(2, pagerOn = ev.target.checked);
-    	const change_handler = ev => $$invalidate(1, caption = ev.target.value);
+    	const input_handler = ev => $$invalidate(4, stringData = ev.target.value);
+    	const change_handler = ev => $$invalidate(2, pagerOn = ev.target.checked);
+    	const input_handler_1 = ev => $$invalidate(1, caption = ev.target.value);
     	const change_handler_1 = ev => $$invalidate(3, theme = ev.target.value);
 
     	$$self.$capture_state = () => ({
@@ -4159,9 +4162,9 @@ var app = (function () {
     		theme,
     		stringData,
     		setData,
-    		func,
-    		func_1,
+    		input_handler,
     		change_handler,
+    		input_handler_1,
     		change_handler_1
     	];
     }
@@ -4566,17 +4569,18 @@ var app = (function () {
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "page-size-options", "2,5,15");
     			set_custom_element_data(zing_grid, "data", zing_grid_data_value = JSON.stringify(/*tableData*/ ctx[1]));
-    			add_location(zing_grid, file$1, 34, 1, 918);
-    			add_location(p, file$1, 49, 2, 1259);
+    			add_location(zing_grid, file$1, 34, 1, 886);
+    			add_location(p, file$1, 49, 2, 1227);
     			attr_dev(textarea, "name", "ds");
     			attr_dev(textarea, "cols", "50");
     			attr_dev(textarea, "rows", "22");
     			textarea.value = /*textData*/ ctx[2];
-    			add_location(textarea, file$1, 50, 2, 1278);
+    			attr_dev(textarea, "spellcheck", false);
+    			add_location(textarea, file$1, 50, 2, 1246);
     			attr_dev(div0, "class", "Sidebar-wrapper");
-    			add_location(div0, file$1, 48, 1, 1227);
+    			add_location(div0, file$1, 48, 1, 1195);
     			attr_dev(div1, "class", "GridSidebar-wrapper");
-    			add_location(div1, file$1, 33, 0, 883);
+    			add_location(div1, file$1, 33, 0, 851);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -4592,7 +4596,7 @@ var app = (function () {
     			append_dev(div0, textarea);
 
     			if (!mounted) {
-    				dispose = listen_dev(textarea, "change", /*change_handler*/ ctx[4], false, false, false);
+    				dispose = listen_dev(textarea, "input", /*input_handler*/ ctx[4], false, false, false);
     				mounted = true;
     			}
     		},
@@ -4648,10 +4652,10 @@ var app = (function () {
 
     	// Attach event listeners to grid
     	onMount(() => {
-    		grid.current.addEventListener('data:record:delete', dataChange);
-    		grid.current.addEventListener('data:record:insert', dataChange);
-    		grid.current.addEventListener('data:cell:change', dataChange);
-    		grid.current.addEventListener('data:record:change', dataChange);
+    		grid.addEventListener('data:record:delete', dataChange);
+    		grid.addEventListener('data:record:insert', dataChange);
+    		grid.addEventListener('data:cell:change', dataChange);
+    		grid.addEventListener('data:record:change', dataChange);
     	});
 
     	const writable_props = [];
@@ -4667,7 +4671,7 @@ var app = (function () {
     		});
     	}
 
-    	const change_handler = ev => {
+    	const input_handler = ev => {
     		$$invalidate(1, tableData = JSON.parse(ev.target.value));
     		$$invalidate(2, textData = ev.target.value);
     	};
@@ -4690,7 +4694,7 @@ var app = (function () {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	return [grid, tableData, textData, zing_grid_binding, change_handler];
+    	return [grid, tableData, textData, zing_grid_binding, input_handler];
     }
 
     class TwoWay extends SvelteComponentDev {

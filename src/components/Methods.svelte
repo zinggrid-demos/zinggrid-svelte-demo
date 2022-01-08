@@ -30,7 +30,7 @@
 	<zing-grid 
 		bind:this={grid} 
 		editor 
-		pager
+		pager={true}
 		head-class="grid-header"
 		/>
 	<div class="Sidebar-wrapper">

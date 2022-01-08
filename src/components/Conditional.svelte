@@ -47,7 +47,7 @@
 		layout="row"
 		head-class="grid-header"
 		viewport-stop
-		pager
+		pager={true}
 		page-size="5"
 	>
 		{#if defaultColumns}

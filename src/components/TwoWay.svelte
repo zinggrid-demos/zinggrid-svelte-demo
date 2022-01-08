@@ -24,10 +24,10 @@
 
 	// Attach event listeners to grid
 	onMount(() => {
-		grid.current.addEventListener('data:record:delete', dataChange)
-		grid.current.addEventListener('data:record:insert', dataChange)
-		grid.current.addEventListener('data:cell:change', dataChange)
-		grid.current.addEventListener('data:record:change', dataChange)
+		grid.addEventListener('data:record:delete', dataChange)
+		grid.addEventListener('data:record:insert', dataChange)
+		grid.addEventListener('data:cell:change', dataChange)
+		grid.addEventListener('data:record:change', dataChange)
 	})
 </script>
 
@@ -48,7 +48,7 @@
 		data={JSON.stringify(tableData)} />
 	<div class="Sidebar-wrapper">
 		<p>JSON data</p>
-		<textarea name="ds" cols="50" rows="22" value={textData}
-			on:change={ev => { tableData = JSON.parse(ev.target.value); textData = ev.target.value } } />
+		<textarea name="ds" cols="50" rows="22" value={textData} spellcheck={false}
+			on:input={ev => { tableData = JSON.parse(ev.target.value); textData = ev.target.value } } />
 	</div>
 </div>

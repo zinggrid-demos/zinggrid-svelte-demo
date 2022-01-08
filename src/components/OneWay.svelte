@@ -20,7 +20,7 @@
 		]
 	]
 
-	let dataIndex = 1
+	let dataIndex = '1'
 	let caption = 'Change Me Please!'
 	let pagerOn = true	
 	let theme = 'default'
@@ -46,28 +46,28 @@
 		page-size-options="2,5,15,25,50" />
 	<div class="Sidebar-wrapper">
 		<p>Paste your JSON data here:</p>
-		<textarea name="ds" cols="50" rows="12" value={stringData} 
-			onChange={ev => stringData = ev.target.value} />
+		<textarea name="ds" cols="50" rows="12" value={stringData} spellcheck={false}
+			on:input={ev => stringData = ev.target.value} />
 		<br />
 		
-		<label htmlFor="pager-toggle">Toggle Pager</label>
+		<label for="pager-toggle">Toggle Pager</label>
 		<input id="pager-toggle" type="checkbox" checked={pagerOn} 
-			onChange={ev => pagerOn = ev.target.checked} />
+			on:change={ev => pagerOn = ev.target.checked} />
 		<br />
 
-		<label htmlFor="data-select">Load Data Set: </label>
+		<label for="data-select">Load Data Set: </label>
 		<select id="data-select" value={dataIndex} on:change={setData}>
 			<option value="0">Numbers</option>
 			<option value="1">Dogs</option>
 		</select>
 		<br />
 
-		<label htmlFor="caption-text">Change Caption: </label>
+		<label for="caption-text">Change Caption: </label>
 		<input id="caption-text" type="text" placeholder="Caption" value={caption} 
-			on:change={ev => caption = ev.target.value} />
+			on:input={ev => caption = ev.target.value} />
 		<br />
 
-		<label htmlFor="theme-text">Change Theme: </label>
+		<label for="theme-text">Change Theme: </label>
 		<select id="theme-text" value={theme} on:change={ev => theme = ev.target.value}>
 			<option value="default">Default</option>
 			<option value="android">Android</option>

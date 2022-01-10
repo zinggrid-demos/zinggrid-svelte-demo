@@ -3536,15 +3536,14 @@ var app = (function () {
     		c: function create() {
     			div = element("div");
     			zing_grid = element("zing-grid");
-    			set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[1]);
     			set_custom_element_data(zing_grid, "caption", "Shows");
     			set_custom_element_data(zing_grid, "editor", "");
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "loading", true);
     			set_custom_element_data(zing_grid, "loading-text", "Loading (delayed by 2 seconds)");
-    			add_location(zing_grid, file$6, 31, 1, 680);
+    			add_location(zing_grid, file$6, 31, 1, 678);
     			attr_dev(div, "class", "Grid-wrapper");
-    			add_location(div, file$6, 30, 0, 652);
+    			add_location(div, file$6, 30, 0, 650);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -3552,18 +3551,14 @@ var app = (function () {
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
     			append_dev(div, zing_grid);
-    			/*zing_grid_binding*/ ctx[2](zing_grid);
+    			/*zing_grid_binding*/ ctx[1](zing_grid);
     		},
-    		p: function update(ctx, [dirty]) {
-    			if (dirty & /*dataSet*/ 2) {
-    				set_custom_element_data(zing_grid, "data", /*dataSet*/ ctx[1]);
-    			}
-    		},
+    		p: noop,
     		i: noop,
     		o: noop,
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div);
-    			/*zing_grid_binding*/ ctx[2](null);
+    			/*zing_grid_binding*/ ctx[1](null);
     		}
     	};
 
@@ -3582,7 +3577,6 @@ var app = (function () {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('Fetch', slots, []);
     	let grid = null;
-    	let dataSet = undefined;
 
     	// Delay for ms milliseconds
     	const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -3590,20 +3584,19 @@ var app = (function () {
     	// Fetch the dataset
     	async function getData() {
     		try {
-    			grid.setAttribute('loading', '');
     			const res = await fetch('./shows.json');
     			const data = await res.json();
 
     			// purposely delay so the loading screen displays longer
     			await delay(2000);
 
-    			$$invalidate(1, dataSet = JSON.stringify(data.shows));
+    			grid.setData(data.shows);
     		} catch(err) {
     			console.log(err);
     		}
     	}
 
-    	onMount(() => grid.executeOnLoad(() => setTimeout(getData, 0)));
+    	onMount(getData);
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
@@ -3617,18 +3610,17 @@ var app = (function () {
     		});
     	}
 
-    	$$self.$capture_state = () => ({ onMount, grid, dataSet, delay, getData });
+    	$$self.$capture_state = () => ({ onMount, grid, delay, getData });
 
     	$$self.$inject_state = $$props => {
     		if ('grid' in $$props) $$invalidate(0, grid = $$props.grid);
-    		if ('dataSet' in $$props) $$invalidate(1, dataSet = $$props.dataSet);
     	};
 
     	if ($$props && "$$inject" in $$props) {
     		$$self.$inject_state($$props.$$inject);
     	}
 
-    	return [grid, dataSet, zing_grid_binding];
+    	return [grid, zing_grid_binding];
     }
 
     class Fetch extends SvelteComponentDev {

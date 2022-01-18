@@ -30,6 +30,14 @@ var app = (function () {
     function safe_not_equal(a, b) {
         return a != a ? b == b : a !== b || ((a && typeof a === 'object') || typeof a === 'function');
     }
+    let src_url_equal_anchor;
+    function src_url_equal(element_src, url) {
+        if (!src_url_equal_anchor) {
+            src_url_equal_anchor = document.createElement('a');
+        }
+        src_url_equal_anchor.href = url;
+        return element_src === src_url_equal_anchor.href;
+    }
     function is_empty(obj) {
         return Object.keys(obj).length === 0;
     }
@@ -94,6 +102,25 @@ var app = (function () {
         }
         return -1;
     }
+    function exclude_internal_props(props) {
+        const result = {};
+        for (const k in props)
+            if (k[0] !== '$')
+                result[k] = props[k];
+        return result;
+    }
+    function compute_rest_props(props, keys) {
+        const rest = {};
+        keys = new Set(keys);
+        for (const k in props)
+            if (!keys.has(k) && k[0] !== '$')
+                rest[k] = props[k];
+        return rest;
+    }
+    function set_store_value(store, ret, value) {
+        store.set(value);
+        return ret;
+    }
     function append(target, node) {
         target.appendChild(node);
     }
@@ -102,6 +129,12 @@ var app = (function () {
     }
     function detach(node) {
         node.parentNode.removeChild(node);
+    }
+    function destroy_each(iterations, detaching) {
+        for (let i = 0; i < iterations.length; i += 1) {
+            if (iterations[i])
+                iterations[i].d(detaching);
+        }
     }
     function element(name) {
         return document.createElement(name);
@@ -125,6 +158,27 @@ var app = (function () {
         else if (node.getAttribute(attribute) !== value)
             node.setAttribute(attribute, value);
     }
+    function set_attributes(node, attributes) {
+        // @ts-ignore
+        const descriptors = Object.getOwnPropertyDescriptors(node.__proto__);
+        for (const key in attributes) {
+            if (attributes[key] == null) {
+                node.removeAttribute(key);
+            }
+            else if (key === 'style') {
+                node.style.cssText = attributes[key];
+            }
+            else if (key === '__value') {
+                node.value = node[key] = attributes[key];
+            }
+            else if (descriptors[key] && descriptors[key].set) {
+                node[key] = attributes[key];
+            }
+            else {
+                attr(node, key, attributes[key]);
+            }
+        }
+    }
     function set_custom_element_data(node, prop, value) {
         if (prop in node) {
             node[prop] = typeof node[prop] === 'boolean' && value === '' ? true : value;
@@ -135,6 +189,9 @@ var app = (function () {
     }
     function children(element) {
         return Array.from(element.childNodes);
+    }
+    function set_style(node, key, value, important) {
+        node.style.setProperty(key, value, important ? 'important' : '');
     }
     function select_option(select, value) {
         for (let i = 0; i < select.options.length; i += 1) {
@@ -167,6 +224,9 @@ var app = (function () {
     function onMount(fn) {
         get_current_component().$$.on_mount.push(fn);
     }
+    function afterUpdate(fn) {
+        get_current_component().$$.after_update.push(fn);
+    }
 
     const dirty_components = [];
     const binding_callbacks = [];
@@ -179,6 +239,10 @@ var app = (function () {
             update_scheduled = true;
             resolved_promise.then(flush);
         }
+    }
+    function tick() {
+        schedule_update();
+        return resolved_promise;
     }
     function add_render_callback(fn) {
         render_callbacks.push(fn);
@@ -292,6 +356,40 @@ var app = (function () {
         : typeof globalThis !== 'undefined'
             ? globalThis
             : global);
+
+    function get_spread_update(levels, updates) {
+        const update = {};
+        const to_null_out = {};
+        const accounted_for = { $$scope: 1 };
+        let i = levels.length;
+        while (i--) {
+            const o = levels[i];
+            const n = updates[i];
+            if (n) {
+                for (const key in o) {
+                    if (!(key in n))
+                        to_null_out[key] = 1;
+                }
+                for (const key in n) {
+                    if (!accounted_for[key]) {
+                        update[key] = n[key];
+                        accounted_for[key] = 1;
+                    }
+                }
+                levels[i] = n;
+            }
+            else {
+                for (const key in o) {
+                    accounted_for[key] = 1;
+                }
+            }
+        }
+        for (const key in to_null_out) {
+            if (!(key in update))
+                update[key] = undefined;
+        }
+        return update;
+    }
     function create_component(block) {
         block && block.c();
     }
@@ -467,6 +565,15 @@ var app = (function () {
         dispatch_dev('SvelteDOMSetData', { node: text, data });
         text.data = data;
     }
+    function validate_each_argument(arg) {
+        if (typeof arg !== 'string' && !(arg && typeof arg === 'object' && 'length' in arg)) {
+            let msg = '{#each} only iterates over array-like objects.';
+            if (typeof Symbol === 'function' && arg && Symbol.iterator in arg) {
+                msg += ' You can use a spread to convert this iterable into an array.';
+            }
+            throw new Error(msg);
+        }
+    }
     function validate_slots(name, slot, keys) {
         for (const slot_key of Object.keys(slot)) {
             if (!~keys.indexOf(slot_key)) {
@@ -495,6 +602,16 @@ var app = (function () {
     }
 
     const subscriber_queue = [];
+    /**
+     * Creates a `Readable` store that allows reading by subscription.
+     * @param value initial value
+     * @param {StartStopNotifier}start start and stop notifications for subscriptions
+     */
+    function readable(value, start) {
+        return {
+            subscribe: writable(value, start).subscribe
+        };
+    }
     /**
      * Create a `Writable` store that allows both updating and reading by subscription.
      * @param {*=}value initial value
@@ -540,6 +657,47 @@ var app = (function () {
             };
         }
         return { set, update, subscribe };
+    }
+    function derived(stores, fn, initial_value) {
+        const single = !Array.isArray(stores);
+        const stores_array = single
+            ? [stores]
+            : stores;
+        const auto = fn.length < 2;
+        return readable(initial_value, (set) => {
+            let inited = false;
+            const values = [];
+            let pending = 0;
+            let cleanup = noop;
+            const sync = () => {
+                if (pending) {
+                    return;
+                }
+                cleanup();
+                const result = fn(single ? values[0] : values, set);
+                if (auto) {
+                    set(result);
+                }
+                else {
+                    cleanup = is_function(result) ? result : noop;
+                }
+            };
+            const unsubscribers = stores_array.map((store, i) => subscribe$1(store, (value) => {
+                values[i] = value;
+                pending &= ~(1 << i);
+                if (inited) {
+                    sync();
+                }
+            }, () => {
+                pending |= (1 << i);
+            }));
+            inited = true;
+            sync();
+            return function stop() {
+                run_all(unsubscribers);
+                cleanup();
+            };
+        });
     }
 
     const { set, subscribe } = writable({});
@@ -1633,7 +1791,7 @@ var app = (function () {
     }
 
     // (6:0) {#if currentRoute.layout}
-    function create_if_block$1(ctx) {
+    function create_if_block$2(ctx) {
     	let switch_instance;
     	let switch_instance_anchor;
     	let current;
@@ -1712,7 +1870,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_if_block$1.name,
+    		id: create_if_block$2.name,
     		type: "if",
     		source: "(6:0) {#if currentRoute.layout}",
     		ctx
@@ -1721,12 +1879,12 @@ var app = (function () {
     	return block;
     }
 
-    function create_fragment$f(ctx) {
+    function create_fragment$l(ctx) {
     	let current_block_type_index;
     	let if_block;
     	let if_block_anchor;
     	let current;
-    	const if_block_creators = [create_if_block$1, create_if_block_1, create_if_block_2];
+    	const if_block_creators = [create_if_block$2, create_if_block_1, create_if_block_2];
     	const if_blocks = [];
 
     	function select_block_type(ctx, dirty) {
@@ -1812,7 +1970,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$f.name,
+    		id: create_fragment$l.name,
     		type: "component",
     		source: "",
     		ctx
@@ -1821,7 +1979,7 @@ var app = (function () {
     	return block;
     }
 
-    function instance$f($$self, $$props, $$invalidate) {
+    function instance$l($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('Route', slots, []);
     	let { currentRoute = {} } = $$props;
@@ -1854,13 +2012,13 @@ var app = (function () {
     class Route extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$f, create_fragment$f, safe_not_equal, { currentRoute: 0, params: 1 });
+    		init(this, options, instance$l, create_fragment$l, safe_not_equal, { currentRoute: 0, params: 1 });
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Route",
     			options,
-    			id: create_fragment$f.name
+    			id: create_fragment$l.name
     		});
     	}
 
@@ -1883,7 +2041,7 @@ var app = (function () {
 
     /* node_modules/svelte-router-spa/src/components/router.svelte generated by Svelte v3.44.3 */
 
-    function create_fragment$e(ctx) {
+    function create_fragment$k(ctx) {
     	let route;
     	let current;
 
@@ -1924,7 +2082,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$e.name,
+    		id: create_fragment$k.name,
     		type: "component",
     		source: "",
     		ctx
@@ -1933,7 +2091,7 @@ var app = (function () {
     	return block;
     }
 
-    function instance$e($$self, $$props, $$invalidate) {
+    function instance$k($$self, $$props, $$invalidate) {
     	let $activeRoute;
     	validate_store(activeRoute, 'activeRoute');
     	component_subscribe($$self, activeRoute, $$value => $$invalidate(0, $activeRoute = $$value));
@@ -1982,13 +2140,13 @@ var app = (function () {
     class Router extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$e, create_fragment$e, safe_not_equal, { routes: 1, options: 2 });
+    		init(this, options, instance$k, create_fragment$k, safe_not_equal, { routes: 1, options: 2 });
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Router",
     			options,
-    			id: create_fragment$e.name
+    			id: create_fragment$k.name
     		});
     	}
 
@@ -2010,9 +2168,9 @@ var app = (function () {
     }
 
     /* node_modules/svelte-router-spa/src/components/navigate.svelte generated by Svelte v3.44.3 */
-    const file$c = "node_modules/svelte-router-spa/src/components/navigate.svelte";
+    const file$i = "node_modules/svelte-router-spa/src/components/navigate.svelte";
 
-    function create_fragment$d(ctx) {
+    function create_fragment$j(ctx) {
     	let a;
     	let current;
     	let mounted;
@@ -2028,7 +2186,7 @@ var app = (function () {
     			attr_dev(a, "title", /*title*/ ctx[1]);
     			attr_dev(a, "class", /*styles*/ ctx[2]);
     			toggle_class(a, "active", routeIsActive(/*to*/ ctx[0]));
-    			add_location(a, file$c, 26, 0, 560);
+    			add_location(a, file$i, 26, 0, 560);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -2098,7 +2256,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$d.name,
+    		id: create_fragment$j.name,
     		type: "component",
     		source: "",
     		ctx
@@ -2107,7 +2265,7 @@ var app = (function () {
     	return block;
     }
 
-    function instance$d($$self, $$props, $$invalidate) {
+    function instance$j($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('Navigate', slots, ['default']);
     	let { to = '/' } = $$props;
@@ -2175,13 +2333,13 @@ var app = (function () {
     class Navigate extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$d, create_fragment$d, safe_not_equal, { to: 0, title: 1, styles: 2, lang: 4 });
+    		init(this, options, instance$j, create_fragment$j, safe_not_equal, { to: 0, title: 1, styles: 2, lang: 4 });
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "Navigate",
     			options,
-    			id: create_fragment$d.name
+    			id: create_fragment$j.name
     		});
     	}
 
@@ -2218,6 +2376,205 @@ var app = (function () {
     	}
     }
 
+    /*
+     * Globally accessible storage
+     */
+
+    const pubDate = writable('');
+    const version = writable('');
+    const showCode = writable(false);
+
+    const github = readable('https://github.com/zinggrid-demos/zinggrid-svelte-demo');
+    const gitBlob = derived(github, $github => $github + '/blob/main/src/demos/');
+    const gitIssues = derived(github, $github => $github + '/issues');
+    const pricing = readable('https://zinggrid.com/pricing');
+
+    const modules = writable({     
+    	'/': {
+    			label: 'Hello World',
+    			text: 'Demonstrates a simple read-only grid of static data',
+    			info: 'Simple demo of a ZingGrid with local, static data obtained from a constant. Note that the data attribute provided to ZingGrid is a JSON rendering of the data object.',
+    			file: 'Simple.svelte',
+    			code: ''
+    	},
+    	'/themes': {
+    		label: 'Themes',
+    		text: 'Demonstrates a read-only grid of static data with a theme selector',
+    		info: 'Here we obtain a Svelte reference to the grid so we can change its theme and set the data after it has been displayed. Note that the data does not need to be converted to JSON when using setData().',
+    		file: 'Themes.svelte',
+    		code: ''
+    	},
+    	'/methods': {
+    		label: 'Methods',
+    		text: 'Demonstrates using a method call to set the data for a grid',
+    		info: 'Using references to the grid and a textarea, we use the text to set the data for the grid when the "Set Data" button is pressed.',
+    		file: 'Methods.svelte',
+    		code: ''
+    	},
+    	'/events': {
+    		label: 'Events',
+    		text: 'Demonstrates grid events',
+    		info: 'In this demo we attach event listeners to the grid and log the events to a textarea.',
+    		file: 'Events.svelte',
+    		code: ''
+    	},
+    	'/fetch': {
+    		label: 'Data from server',
+    		text: 'Demonstrates fetching grid data from the server',
+    		info: 'Here we fetch the data for the grid from the server, with a 2-second delay added to simulate a slow connection so we can see the "loading" indicator.',
+    		file: 'Fetch.svelte',
+    		code: ''
+    	},
+    	'/oneway': {
+    		label: 'One-Way Binding',
+    		text: 'Demonstrates data binding in one direction',
+    		info: 'This demo shows a textarea bound to a grid so that changes to the textarea instantly appear in the grid. Additional controls demonstrate changing various aspects of the grid.',
+    		file: 'OneWay.svelte',
+    		code: ''
+    	},
+    	'/twoway': {
+    		label: 'Two-Way Binding',
+    		text: 'Demonstrates data binding in two directions',
+    		info: 'Here we show a grid with editing enabled. Changes to the grid are reflected in the textarea, and changes to the textarea update the data in the grid.',
+    		file: 'TwoWay.svelte',
+    		code: ''
+    	},
+    	'/conditional': {
+    		label: 'Conditional Rendering',
+    		text: 'Demonstrates conditional rendering',
+    		info: 'Here we dynamically render zg-columns so we can show multiple datasets in a single grid. ZingGrid auotmatically picks up the mutation and adjusts the layout of the columns.',
+    		file: 'Conditional.svelte',
+    		code: ''
+    	},
+    	'/register': {
+    		label: 'Register Method',
+    		text: 'Demonstrates registering a custom rendering method',
+    		info: 'Here we register a custom rendering method that the ZingGrid applies when rendering column 1, converting the text to all uppercase.',
+    		file: 'Register.svelte',
+    		code: ''
+    	},
+    });
+
+    /* src/components/TopHeader.svelte generated by Svelte v3.44.3 */
+    const file$h = "src/components/TopHeader.svelte";
+
+    function create_fragment$i(ctx) {
+    	let div2;
+    	let div0;
+    	let a0;
+    	let img0;
+    	let img0_src_value;
+    	let t0;
+    	let h2;
+    	let t2;
+    	let div1;
+    	let a1;
+    	let img1;
+    	let img1_src_value;
+
+    	const block = {
+    		c: function create() {
+    			div2 = element("div");
+    			div0 = element("div");
+    			a0 = element("a");
+    			img0 = element("img");
+    			t0 = space();
+    			h2 = element("h2");
+    			h2.textContent = "ZingGrid Svelte Demo";
+    			t2 = space();
+    			div1 = element("div");
+    			a1 = element("a");
+    			img1 = element("img");
+    			if (!src_url_equal(img0.src, img0_src_value = "logo.png")) attr_dev(img0, "src", img0_src_value);
+    			attr_dev(img0, "alt", "ZingGrid logo");
+    			add_location(img0, file$h, 6, 66, 161);
+    			attr_dev(a0, "href", "https://zinggrid.com");
+    			attr_dev(a0, "target", "_blank");
+    			attr_dev(a0, "rel", "noreferrer");
+    			add_location(a0, file$h, 6, 2, 97);
+    			attr_dev(div0, "class", "icon svelte-1j68og0");
+    			add_location(div0, file$h, 5, 1, 76);
+    			add_location(h2, file$h, 8, 1, 218);
+    			if (!src_url_equal(img1.src, img1_src_value = "github.png")) attr_dev(img1, "src", img1_src_value);
+    			attr_dev(img1, "alt", "Github logo");
+    			add_location(img1, file$h, 10, 53, 327);
+    			attr_dev(a1, "href", /*$github*/ ctx[0]);
+    			attr_dev(a1, "target", "_blank");
+    			attr_dev(a1, "rel", "noreferrer");
+    			add_location(a1, file$h, 10, 2, 276);
+    			attr_dev(div1, "class", "icon right svelte-1j68og0");
+    			add_location(div1, file$h, 9, 1, 249);
+    			attr_dev(div2, "class", "header svelte-1j68og0");
+    			add_location(div2, file$h, 4, 0, 54);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div2, anchor);
+    			append_dev(div2, div0);
+    			append_dev(div0, a0);
+    			append_dev(a0, img0);
+    			append_dev(div2, t0);
+    			append_dev(div2, h2);
+    			append_dev(div2, t2);
+    			append_dev(div2, div1);
+    			append_dev(div1, a1);
+    			append_dev(a1, img1);
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*$github*/ 1) {
+    				attr_dev(a1, "href", /*$github*/ ctx[0]);
+    			}
+    		},
+    		i: noop,
+    		o: noop,
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div2);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$i.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$i($$self, $$props, $$invalidate) {
+    	let $github;
+    	validate_store(github, 'github');
+    	component_subscribe($$self, github, $$value => $$invalidate(0, $github = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('TopHeader', slots, []);
+    	const writable_props = [];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<TopHeader> was created with unknown prop '${key}'`);
+    	});
+
+    	$$self.$capture_state = () => ({ github, $github });
+    	return [$github];
+    }
+
+    class TopHeader extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$i, create_fragment$i, safe_not_equal, {});
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "TopHeader",
+    			options,
+    			id: create_fragment$i.name
+    		});
+    	}
+    }
+
     /* src/components/NavbarItem.svelte generated by Svelte v3.44.3 */
 
     // (16:0) <Navigate   to={path}   title={label}  styles="{isCurrent ? 'navbtn current' : 'navbtn'}">
@@ -2250,7 +2607,7 @@ var app = (function () {
     	return block;
     }
 
-    function create_fragment$c(ctx) {
+    function create_fragment$h(ctx) {
     	let navigate;
     	let current;
 
@@ -2304,7 +2661,7 @@ var app = (function () {
 
     	dispatch_dev("SvelteRegisterBlock", {
     		block,
-    		id: create_fragment$c.name,
+    		id: create_fragment$h.name,
     		type: "component",
     		source: "",
     		ctx
@@ -2313,7 +2670,7 @@ var app = (function () {
     	return block;
     }
 
-    function instance$c($$self, $$props, $$invalidate) {
+    function instance$h($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('NavbarItem', slots, []);
     	let { path = '' } = $$props;
@@ -2363,13 +2720,13 @@ var app = (function () {
     class NavbarItem extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$c, create_fragment$c, safe_not_equal, { path: 0, label: 1, currentRoute: 3 });
+    		init(this, options, instance$h, create_fragment$h, safe_not_equal, { path: 0, label: 1, currentRoute: 3 });
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
     			tagName: "NavbarItem",
     			options,
-    			id: create_fragment$c.name
+    			id: create_fragment$h.name
     		});
 
     		const { ctx } = this.$$;
@@ -2405,282 +2762,3568 @@ var app = (function () {
     	}
     }
 
-    /* src/components/TopHeader.svelte generated by Svelte v3.44.3 */
-    const file$b = "src/components/TopHeader.svelte";
+    /* src/components/TopButtonBar.svelte generated by Svelte v3.44.3 */
 
-    function create_fragment$b(ctx) {
-    	let div2;
-    	let h2;
-    	let t1;
-    	let div0;
-    	let navbaritem0;
-    	let t2;
-    	let navbaritem1;
-    	let t3;
-    	let navbaritem2;
-    	let t4;
-    	let navbaritem3;
-    	let t5;
-    	let navbaritem4;
-    	let t6;
-    	let navbaritem5;
-    	let t7;
-    	let navbaritem6;
-    	let t8;
-    	let navbaritem7;
-    	let t9;
-    	let navbaritem8;
-    	let t10;
-    	let h4;
-    	let t11_value = /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].text + "";
-    	let t11;
-    	let t12;
-    	let div1;
-    	let a;
-    	let t13;
-    	let t14_value = /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].file + "";
-    	let t14;
-    	let t15;
-    	let a_href_value;
+    const { Object: Object_1$1 } = globals;
+    const file$g = "src/components/TopButtonBar.svelte";
+
+    function get_each_context(ctx, list, i) {
+    	const child_ctx = ctx.slice();
+    	child_ctx[2] = list[i][0];
+    	child_ctx[3] = list[i][1];
+    	return child_ctx;
+    }
+
+    // (10:1) {#each Object.entries($modules) as [path, mod]}
+    function create_each_block(ctx) {
+    	let navbaritem;
     	let current;
 
-    	navbaritem0 = new NavbarItem({
+    	navbaritem = new NavbarItem({
     			props: {
     				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/",
-    				label: "Hello World"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem1 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/themes",
-    				label: "Themes"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem2 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/methods",
-    				label: "Methods"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem3 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/events",
-    				label: "Events"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem4 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/fetch",
-    				label: "Fetch"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem5 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/oneway",
-    				label: "One-Way Binding"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem6 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/twoway",
-    				label: "Two-Way Binding"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem7 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/conditional",
-    				label: "Conditional Rendering"
-    			},
-    			$$inline: true
-    		});
-
-    	navbaritem8 = new NavbarItem({
-    			props: {
-    				currentRoute: /*currentRoute*/ ctx[0],
-    				path: "/register",
-    				label: "Register Method"
+    				path: /*path*/ ctx[2],
+    				label: /*mod*/ ctx[3].label
     			},
     			$$inline: true
     		});
 
     	const block = {
     		c: function create() {
-    			div2 = element("div");
-    			h2 = element("h2");
-    			h2.textContent = "ZingGrid Svelte Demo";
+    			create_component(navbaritem.$$.fragment);
+    		},
+    		m: function mount(target, anchor) {
+    			mount_component(navbaritem, target, anchor);
+    			current = true;
+    		},
+    		p: function update(ctx, dirty) {
+    			const navbaritem_changes = {};
+    			if (dirty & /*currentRoute*/ 1) navbaritem_changes.currentRoute = /*currentRoute*/ ctx[0];
+    			if (dirty & /*$modules*/ 2) navbaritem_changes.path = /*path*/ ctx[2];
+    			if (dirty & /*$modules*/ 2) navbaritem_changes.label = /*mod*/ ctx[3].label;
+    			navbaritem.$set(navbaritem_changes);
+    		},
+    		i: function intro(local) {
+    			if (current) return;
+    			transition_in(navbaritem.$$.fragment, local);
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			transition_out(navbaritem.$$.fragment, local);
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			destroy_component(navbaritem, detaching);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_each_block.name,
+    		type: "each",
+    		source: "(10:1) {#each Object.entries($modules) as [path, mod]}",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function create_fragment$g(ctx) {
+    	let div;
+    	let current;
+    	let each_value = Object.entries(/*$modules*/ ctx[1]);
+    	validate_each_argument(each_value);
+    	let each_blocks = [];
+
+    	for (let i = 0; i < each_value.length; i += 1) {
+    		each_blocks[i] = create_each_block(get_each_context(ctx, each_value, i));
+    	}
+
+    	const out = i => transition_out(each_blocks[i], 1, 1, () => {
+    		each_blocks[i] = null;
+    	});
+
+    	const block = {
+    		c: function create() {
+    			div = element("div");
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].c();
+    			}
+
+    			attr_dev(div, "class", "buttonbar svelte-1hslffn");
+    			add_location(div, file$g, 8, 0, 128);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div, anchor);
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				each_blocks[i].m(div, null);
+    			}
+
+    			current = true;
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*currentRoute, Object, $modules*/ 3) {
+    				each_value = Object.entries(/*$modules*/ ctx[1]);
+    				validate_each_argument(each_value);
+    				let i;
+
+    				for (i = 0; i < each_value.length; i += 1) {
+    					const child_ctx = get_each_context(ctx, each_value, i);
+
+    					if (each_blocks[i]) {
+    						each_blocks[i].p(child_ctx, dirty);
+    						transition_in(each_blocks[i], 1);
+    					} else {
+    						each_blocks[i] = create_each_block(child_ctx);
+    						each_blocks[i].c();
+    						transition_in(each_blocks[i], 1);
+    						each_blocks[i].m(div, null);
+    					}
+    				}
+
+    				group_outros();
+
+    				for (i = each_value.length; i < each_blocks.length; i += 1) {
+    					out(i);
+    				}
+
+    				check_outros();
+    			}
+    		},
+    		i: function intro(local) {
+    			if (current) return;
+
+    			for (let i = 0; i < each_value.length; i += 1) {
+    				transition_in(each_blocks[i]);
+    			}
+
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			each_blocks = each_blocks.filter(Boolean);
+
+    			for (let i = 0; i < each_blocks.length; i += 1) {
+    				transition_out(each_blocks[i]);
+    			}
+
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div);
+    			destroy_each(each_blocks, detaching);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$g.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$g($$self, $$props, $$invalidate) {
+    	let $modules;
+    	validate_store(modules, 'modules');
+    	component_subscribe($$self, modules, $$value => $$invalidate(1, $modules = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('TopButtonBar', slots, []);
+    	let { currentRoute } = $$props;
+    	const writable_props = ['currentRoute'];
+
+    	Object_1$1.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<TopButtonBar> was created with unknown prop '${key}'`);
+    	});
+
+    	$$self.$$set = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
+    	};
+
+    	$$self.$capture_state = () => ({
+    		modules,
+    		NavbarItem,
+    		currentRoute,
+    		$modules
+    	});
+
+    	$$self.$inject_state = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	return [currentRoute, $modules];
+    }
+
+    class TopButtonBar extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$g, create_fragment$g, safe_not_equal, { currentRoute: 0 });
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "TopButtonBar",
+    			options,
+    			id: create_fragment$g.name
+    		});
+
+    		const { ctx } = this.$$;
+    		const props = options.props || {};
+
+    		if (/*currentRoute*/ ctx[0] === undefined && !('currentRoute' in props)) {
+    			console.warn("<TopButtonBar> was created without expected prop 'currentRoute'");
+    		}
+    	}
+
+    	get currentRoute() {
+    		throw new Error("<TopButtonBar>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set currentRoute(value) {
+    		throw new Error("<TopButtonBar>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+    }
+
+    /* src/components/DemoTitleBar.svelte generated by Svelte v3.44.3 */
+    const file$f = "src/components/DemoTitleBar.svelte";
+
+    function create_fragment$f(ctx) {
+    	let div1;
+    	let span0;
+    	let t0_value = /*$modules*/ ctx[1][/*currentRoute*/ ctx[0].name].text + "";
+    	let t0;
+    	let t1;
+    	let div0;
+    	let img;
+    	let img_src_value;
+    	let t2;
+    	let span1;
+    	let t3_value = /*$modules*/ ctx[1][/*currentRoute*/ ctx[0].name].info + "";
+    	let t3;
+
+    	const block = {
+    		c: function create() {
+    			div1 = element("div");
+    			span0 = element("span");
+    			t0 = text(t0_value);
     			t1 = space();
     			div0 = element("div");
-    			create_component(navbaritem0.$$.fragment);
+    			img = element("img");
     			t2 = space();
-    			create_component(navbaritem1.$$.fragment);
-    			t3 = space();
-    			create_component(navbaritem2.$$.fragment);
-    			t4 = space();
-    			create_component(navbaritem3.$$.fragment);
-    			t5 = space();
-    			create_component(navbaritem4.$$.fragment);
-    			t6 = space();
-    			create_component(navbaritem5.$$.fragment);
-    			t7 = space();
-    			create_component(navbaritem6.$$.fragment);
-    			t8 = space();
-    			create_component(navbaritem7.$$.fragment);
-    			t9 = space();
-    			create_component(navbaritem8.$$.fragment);
-    			t10 = space();
-    			h4 = element("h4");
-    			t11 = text(t11_value);
-    			t12 = space();
+    			span1 = element("span");
+    			t3 = text(t3_value);
+    			add_location(span0, file$f, 8, 1, 106);
+    			if (!src_url_equal(img.src, img_src_value = "info_icon.png")) attr_dev(img, "src", img_src_value);
+    			attr_dev(img, "alt", "more info button");
+    			add_location(img, file$f, 10, 2, 179);
+    			attr_dev(span1, "class", "tooltiptext svelte-538bc4");
+    			add_location(span1, file$f, 11, 2, 232);
+    			attr_dev(div0, "class", "tooltip svelte-538bc4");
+    			add_location(div0, file$f, 9, 1, 155);
+    			attr_dev(div1, "class", "titlebar svelte-538bc4");
+    			add_location(div1, file$f, 7, 0, 82);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div1, anchor);
+    			append_dev(div1, span0);
+    			append_dev(span0, t0);
+    			append_dev(div1, t1);
+    			append_dev(div1, div0);
+    			append_dev(div0, img);
+    			append_dev(div0, t2);
+    			append_dev(div0, span1);
+    			append_dev(span1, t3);
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*$modules, currentRoute*/ 3 && t0_value !== (t0_value = /*$modules*/ ctx[1][/*currentRoute*/ ctx[0].name].text + "")) set_data_dev(t0, t0_value);
+    			if (dirty & /*$modules, currentRoute*/ 3 && t3_value !== (t3_value = /*$modules*/ ctx[1][/*currentRoute*/ ctx[0].name].info + "")) set_data_dev(t3, t3_value);
+    		},
+    		i: noop,
+    		o: noop,
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div1);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$f.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$f($$self, $$props, $$invalidate) {
+    	let $modules;
+    	validate_store(modules, 'modules');
+    	component_subscribe($$self, modules, $$value => $$invalidate(1, $modules = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('DemoTitleBar', slots, []);
+    	let { currentRoute } = $$props;
+    	const writable_props = ['currentRoute'];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<DemoTitleBar> was created with unknown prop '${key}'`);
+    	});
+
+    	$$self.$$set = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
+    	};
+
+    	$$self.$capture_state = () => ({ modules, currentRoute, $modules });
+
+    	$$self.$inject_state = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	return [currentRoute, $modules];
+    }
+
+    class DemoTitleBar extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$f, create_fragment$f, safe_not_equal, { currentRoute: 0 });
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "DemoTitleBar",
+    			options,
+    			id: create_fragment$f.name
+    		});
+
+    		const { ctx } = this.$$;
+    		const props = options.props || {};
+
+    		if (/*currentRoute*/ ctx[0] === undefined && !('currentRoute' in props)) {
+    			console.warn("<DemoTitleBar> was created without expected prop 'currentRoute'");
+    		}
+    	}
+
+    	get currentRoute() {
+    		throw new Error("<DemoTitleBar>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set currentRoute(value) {
+    		throw new Error("<DemoTitleBar>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+    }
+
+    /* src/components/CodeButtonBar.svelte generated by Svelte v3.44.3 */
+    const file$e = "src/components/CodeButtonBar.svelte";
+
+    function create_fragment$e(ctx) {
+    	let div2;
+    	let div0;
+    	let button0;
+    	let t0_value = (/*$showCode*/ ctx[1] ? 'Hide' : 'Show') + "";
+    	let t0;
+    	let t1;
+    	let t2;
+    	let div1;
+    	let button1;
+    	let mounted;
+    	let dispose;
+
+    	const block = {
+    		c: function create() {
+    			div2 = element("div");
+    			div0 = element("div");
+    			button0 = element("button");
+    			t0 = text(t0_value);
+    			t1 = text(" Source");
+    			t2 = space();
     			div1 = element("div");
-    			a = element("a");
-    			t13 = text("View ");
-    			t14 = text(t14_value);
-    			t15 = text(" on Github");
-    			attr_dev(h2, "class", "svelte-wbfrku");
-    			add_location(h2, file$b, 52, 1, 1218);
-    			attr_dev(div0, "class", "buttonbar svelte-wbfrku");
-    			add_location(div0, file$b, 53, 1, 1249);
-    			attr_dev(h4, "class", "svelte-wbfrku");
-    			add_location(h4, file$b, 64, 1, 1888);
-    			attr_dev(a, "target", "_blank");
-    			attr_dev(a, "rel", "noreferrer");
-    			attr_dev(a, "href", a_href_value = github + /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].file);
-    			attr_dev(a, "class", "svelte-wbfrku");
-    			add_location(a, file$b, 65, 22, 1953);
-    			attr_dev(div1, "class", "viewsrc svelte-wbfrku");
-    			add_location(div1, file$b, 65, 1, 1932);
-    			attr_dev(div2, "class", "header svelte-wbfrku");
-    			add_location(div2, file$b, 51, 0, 1196);
+    			button1 = element("button");
+    			button1.textContent = "View source on GitHub";
+    			attr_dev(button0, "class", "sourcebtn svelte-l9j3ga");
+    			add_location(button0, file$e, 11, 2, 202);
+    			attr_dev(div0, "class", "left");
+    			add_location(div0, file$e, 10, 1, 181);
+    			attr_dev(button1, "class", "sourcebtn svelte-l9j3ga");
+    			add_location(button1, file$e, 14, 2, 345);
+    			attr_dev(div1, "class", "right");
+    			add_location(div1, file$e, 13, 1, 323);
+    			attr_dev(div2, "class", "buttonbar svelte-l9j3ga");
+    			add_location(div2, file$e, 9, 0, 156);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div2, anchor);
-    			append_dev(div2, h2);
-    			append_dev(div2, t1);
     			append_dev(div2, div0);
-    			mount_component(navbaritem0, div0, null);
-    			append_dev(div0, t2);
-    			mount_component(navbaritem1, div0, null);
-    			append_dev(div0, t3);
-    			mount_component(navbaritem2, div0, null);
-    			append_dev(div0, t4);
-    			mount_component(navbaritem3, div0, null);
-    			append_dev(div0, t5);
-    			mount_component(navbaritem4, div0, null);
-    			append_dev(div0, t6);
-    			mount_component(navbaritem5, div0, null);
-    			append_dev(div0, t7);
-    			mount_component(navbaritem6, div0, null);
-    			append_dev(div0, t8);
-    			mount_component(navbaritem7, div0, null);
-    			append_dev(div0, t9);
-    			mount_component(navbaritem8, div0, null);
-    			append_dev(div2, t10);
-    			append_dev(div2, h4);
-    			append_dev(h4, t11);
-    			append_dev(div2, t12);
+    			append_dev(div0, button0);
+    			append_dev(button0, t0);
+    			append_dev(button0, t1);
+    			append_dev(div2, t2);
     			append_dev(div2, div1);
-    			append_dev(div1, a);
-    			append_dev(a, t13);
-    			append_dev(a, t14);
-    			append_dev(a, t15);
+    			append_dev(div1, button1);
+
+    			if (!mounted) {
+    				dispose = [
+    					listen_dev(button0, "click", /*click_handler*/ ctx[5], false, false, false),
+    					listen_dev(button1, "click", /*click_handler_1*/ ctx[6], false, false, false)
+    				];
+
+    				mounted = true;
+    			}
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*$showCode*/ 2 && t0_value !== (t0_value = (/*$showCode*/ ctx[1] ? 'Hide' : 'Show') + "")) set_data_dev(t0, t0_value);
+    		},
+    		i: noop,
+    		o: noop,
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div2);
+    			mounted = false;
+    			run_all(dispose);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$e.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$e($$self, $$props, $$invalidate) {
+    	let src;
+    	let $modules;
+    	let $gitBlob;
+    	let $showCode;
+    	validate_store(modules, 'modules');
+    	component_subscribe($$self, modules, $$value => $$invalidate(3, $modules = $$value));
+    	validate_store(gitBlob, 'gitBlob');
+    	component_subscribe($$self, gitBlob, $$value => $$invalidate(4, $gitBlob = $$value));
+    	validate_store(showCode, 'showCode');
+    	component_subscribe($$self, showCode, $$value => $$invalidate(1, $showCode = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('CodeButtonBar', slots, []);
+    	let { currentRoute } = $$props;
+    	const writable_props = ['currentRoute'];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<CodeButtonBar> was created with unknown prop '${key}'`);
+    	});
+
+    	const click_handler = () => set_store_value(showCode, $showCode = !$showCode, $showCode);
+    	const click_handler_1 = () => window.open(src, '_blank');
+
+    	$$self.$$set = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(2, currentRoute = $$props.currentRoute);
+    	};
+
+    	$$self.$capture_state = () => ({
+    		showCode,
+    		gitBlob,
+    		modules,
+    		currentRoute,
+    		src,
+    		$modules,
+    		$gitBlob,
+    		$showCode
+    	});
+
+    	$$self.$inject_state = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(2, currentRoute = $$props.currentRoute);
+    		if ('src' in $$props) $$invalidate(0, src = $$props.src);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	$$self.$$.update = () => {
+    		if ($$self.$$.dirty & /*$gitBlob, $modules, currentRoute*/ 28) {
+    			$$invalidate(0, src = $gitBlob + $modules[currentRoute.name].file);
+    		}
+    	};
+
+    	return [
+    		src,
+    		$showCode,
+    		currentRoute,
+    		$modules,
+    		$gitBlob,
+    		click_handler,
+    		click_handler_1
+    	];
+    }
+
+    class CodeButtonBar extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$e, create_fragment$e, safe_not_equal, { currentRoute: 2 });
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "CodeButtonBar",
+    			options,
+    			id: create_fragment$e.name
+    		});
+
+    		const { ctx } = this.$$;
+    		const props = options.props || {};
+
+    		if (/*currentRoute*/ ctx[2] === undefined && !('currentRoute' in props)) {
+    			console.warn("<CodeButtonBar> was created without expected prop 'currentRoute'");
+    		}
+    	}
+
+    	get currentRoute() {
+    		throw new Error("<CodeButtonBar>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set currentRoute(value) {
+    		throw new Error("<CodeButtonBar>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+    }
+
+    var commonjsGlobal = typeof globalThis !== 'undefined' ? globalThis : typeof window !== 'undefined' ? window : typeof global !== 'undefined' ? global : typeof self !== 'undefined' ? self : {};
+
+    function createCommonjsModule(fn) {
+      var module = { exports: {} };
+    	return fn(module, module.exports), module.exports;
+    }
+
+    createCommonjsModule(function (module) {
+    /* **********************************************
+         Begin prism-core.js
+    ********************************************** */
+
+    /// <reference lib="WebWorker"/>
+
+    var _self = (typeof window !== 'undefined')
+    	? window   // if in browser
+    	: (
+    		(typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope)
+    			? self // if in worker
+    			: {}   // if in node js
+    	);
+
+    /**
+     * Prism: Lightweight, robust, elegant syntax highlighting
+     *
+     * @license MIT <https://opensource.org/licenses/MIT>
+     * @author Lea Verou <https://lea.verou.me>
+     * @namespace
+     * @public
+     */
+    var Prism = (function (_self) {
+
+    	// Private helper vars
+    	var lang = /(?:^|\s)lang(?:uage)?-([\w-]+)(?=\s|$)/i;
+    	var uniqueId = 0;
+
+    	// The grammar object for plaintext
+    	var plainTextGrammar = {};
+
+
+    	var _ = {
+    		/**
+    		 * By default, Prism will attempt to highlight all code elements (by calling {@link Prism.highlightAll}) on the
+    		 * current page after the page finished loading. This might be a problem if e.g. you wanted to asynchronously load
+    		 * additional languages or plugins yourself.
+    		 *
+    		 * By setting this value to `true`, Prism will not automatically highlight all code elements on the page.
+    		 *
+    		 * You obviously have to change this value before the automatic highlighting started. To do this, you can add an
+    		 * empty Prism object into the global scope before loading the Prism script like this:
+    		 *
+    		 * ```js
+    		 * window.Prism = window.Prism || {};
+    		 * Prism.manual = true;
+    		 * // add a new <script> to load Prism's script
+    		 * ```
+    		 *
+    		 * @default false
+    		 * @type {boolean}
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		manual: _self.Prism && _self.Prism.manual,
+    		/**
+    		 * By default, if Prism is in a web worker, it assumes that it is in a worker it created itself, so it uses
+    		 * `addEventListener` to communicate with its parent instance. However, if you're using Prism manually in your
+    		 * own worker, you don't want it to do this.
+    		 *
+    		 * By setting this value to `true`, Prism will not add its own listeners to the worker.
+    		 *
+    		 * You obviously have to change this value before Prism executes. To do this, you can add an
+    		 * empty Prism object into the global scope before loading the Prism script like this:
+    		 *
+    		 * ```js
+    		 * window.Prism = window.Prism || {};
+    		 * Prism.disableWorkerMessageHandler = true;
+    		 * // Load Prism's script
+    		 * ```
+    		 *
+    		 * @default false
+    		 * @type {boolean}
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		disableWorkerMessageHandler: _self.Prism && _self.Prism.disableWorkerMessageHandler,
+
+    		/**
+    		 * A namespace for utility methods.
+    		 *
+    		 * All function in this namespace that are not explicitly marked as _public_ are for __internal use only__ and may
+    		 * change or disappear at any time.
+    		 *
+    		 * @namespace
+    		 * @memberof Prism
+    		 */
+    		util: {
+    			encode: function encode(tokens) {
+    				if (tokens instanceof Token) {
+    					return new Token(tokens.type, encode(tokens.content), tokens.alias);
+    				} else if (Array.isArray(tokens)) {
+    					return tokens.map(encode);
+    				} else {
+    					return tokens.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/\u00a0/g, ' ');
+    				}
+    			},
+
+    			/**
+    			 * Returns the name of the type of the given value.
+    			 *
+    			 * @param {any} o
+    			 * @returns {string}
+    			 * @example
+    			 * type(null)      === 'Null'
+    			 * type(undefined) === 'Undefined'
+    			 * type(123)       === 'Number'
+    			 * type('foo')     === 'String'
+    			 * type(true)      === 'Boolean'
+    			 * type([1, 2])    === 'Array'
+    			 * type({})        === 'Object'
+    			 * type(String)    === 'Function'
+    			 * type(/abc+/)    === 'RegExp'
+    			 */
+    			type: function (o) {
+    				return Object.prototype.toString.call(o).slice(8, -1);
+    			},
+
+    			/**
+    			 * Returns a unique number for the given object. Later calls will still return the same number.
+    			 *
+    			 * @param {Object} obj
+    			 * @returns {number}
+    			 */
+    			objId: function (obj) {
+    				if (!obj['__id']) {
+    					Object.defineProperty(obj, '__id', { value: ++uniqueId });
+    				}
+    				return obj['__id'];
+    			},
+
+    			/**
+    			 * Creates a deep clone of the given object.
+    			 *
+    			 * The main intended use of this function is to clone language definitions.
+    			 *
+    			 * @param {T} o
+    			 * @param {Record<number, any>} [visited]
+    			 * @returns {T}
+    			 * @template T
+    			 */
+    			clone: function deepClone(o, visited) {
+    				visited = visited || {};
+
+    				var clone; var id;
+    				switch (_.util.type(o)) {
+    					case 'Object':
+    						id = _.util.objId(o);
+    						if (visited[id]) {
+    							return visited[id];
+    						}
+    						clone = /** @type {Record<string, any>} */ ({});
+    						visited[id] = clone;
+
+    						for (var key in o) {
+    							if (o.hasOwnProperty(key)) {
+    								clone[key] = deepClone(o[key], visited);
+    							}
+    						}
+
+    						return /** @type {any} */ (clone);
+
+    					case 'Array':
+    						id = _.util.objId(o);
+    						if (visited[id]) {
+    							return visited[id];
+    						}
+    						clone = [];
+    						visited[id] = clone;
+
+    						(/** @type {Array} */(/** @type {any} */(o))).forEach(function (v, i) {
+    							clone[i] = deepClone(v, visited);
+    						});
+
+    						return /** @type {any} */ (clone);
+
+    					default:
+    						return o;
+    				}
+    			},
+
+    			/**
+    			 * Returns the Prism language of the given element set by a `language-xxxx` or `lang-xxxx` class.
+    			 *
+    			 * If no language is set for the element or the element is `null` or `undefined`, `none` will be returned.
+    			 *
+    			 * @param {Element} element
+    			 * @returns {string}
+    			 */
+    			getLanguage: function (element) {
+    				while (element) {
+    					var m = lang.exec(element.className);
+    					if (m) {
+    						return m[1].toLowerCase();
+    					}
+    					element = element.parentElement;
+    				}
+    				return 'none';
+    			},
+
+    			/**
+    			 * Sets the Prism `language-xxxx` class of the given element.
+    			 *
+    			 * @param {Element} element
+    			 * @param {string} language
+    			 * @returns {void}
+    			 */
+    			setLanguage: function (element, language) {
+    				// remove all `language-xxxx` classes
+    				// (this might leave behind a leading space)
+    				element.className = element.className.replace(RegExp(lang, 'gi'), '');
+
+    				// add the new `language-xxxx` class
+    				// (using `classList` will automatically clean up spaces for us)
+    				element.classList.add('language-' + language);
+    			},
+
+    			/**
+    			 * Returns the script element that is currently executing.
+    			 *
+    			 * This does __not__ work for line script element.
+    			 *
+    			 * @returns {HTMLScriptElement | null}
+    			 */
+    			currentScript: function () {
+    				if (typeof document === 'undefined') {
+    					return null;
+    				}
+    				if ('currentScript' in document && 1 < 2 /* hack to trip TS' flow analysis */) {
+    					return /** @type {any} */ (document.currentScript);
+    				}
+
+    				// IE11 workaround
+    				// we'll get the src of the current script by parsing IE11's error stack trace
+    				// this will not work for inline scripts
+
+    				try {
+    					throw new Error();
+    				} catch (err) {
+    					// Get file src url from stack. Specifically works with the format of stack traces in IE.
+    					// A stack will look like this:
+    					//
+    					// Error
+    					//    at _.util.currentScript (http://localhost/components/prism-core.js:119:5)
+    					//    at Global code (http://localhost/components/prism-core.js:606:1)
+
+    					var src = (/at [^(\r\n]*\((.*):[^:]+:[^:]+\)$/i.exec(err.stack) || [])[1];
+    					if (src) {
+    						var scripts = document.getElementsByTagName('script');
+    						for (var i in scripts) {
+    							if (scripts[i].src == src) {
+    								return scripts[i];
+    							}
+    						}
+    					}
+    					return null;
+    				}
+    			},
+
+    			/**
+    			 * Returns whether a given class is active for `element`.
+    			 *
+    			 * The class can be activated if `element` or one of its ancestors has the given class and it can be deactivated
+    			 * if `element` or one of its ancestors has the negated version of the given class. The _negated version_ of the
+    			 * given class is just the given class with a `no-` prefix.
+    			 *
+    			 * Whether the class is active is determined by the closest ancestor of `element` (where `element` itself is
+    			 * closest ancestor) that has the given class or the negated version of it. If neither `element` nor any of its
+    			 * ancestors have the given class or the negated version of it, then the default activation will be returned.
+    			 *
+    			 * In the paradoxical situation where the closest ancestor contains __both__ the given class and the negated
+    			 * version of it, the class is considered active.
+    			 *
+    			 * @param {Element} element
+    			 * @param {string} className
+    			 * @param {boolean} [defaultActivation=false]
+    			 * @returns {boolean}
+    			 */
+    			isActive: function (element, className, defaultActivation) {
+    				var no = 'no-' + className;
+
+    				while (element) {
+    					var classList = element.classList;
+    					if (classList.contains(className)) {
+    						return true;
+    					}
+    					if (classList.contains(no)) {
+    						return false;
+    					}
+    					element = element.parentElement;
+    				}
+    				return !!defaultActivation;
+    			}
+    		},
+
+    		/**
+    		 * This namespace contains all currently loaded languages and the some helper functions to create and modify languages.
+    		 *
+    		 * @namespace
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		languages: {
+    			/**
+    			 * The grammar for plain, unformatted text.
+    			 */
+    			plain: plainTextGrammar,
+    			plaintext: plainTextGrammar,
+    			text: plainTextGrammar,
+    			txt: plainTextGrammar,
+
+    			/**
+    			 * Creates a deep copy of the language with the given id and appends the given tokens.
+    			 *
+    			 * If a token in `redef` also appears in the copied language, then the existing token in the copied language
+    			 * will be overwritten at its original position.
+    			 *
+    			 * ## Best practices
+    			 *
+    			 * Since the position of overwriting tokens (token in `redef` that overwrite tokens in the copied language)
+    			 * doesn't matter, they can technically be in any order. However, this can be confusing to others that trying to
+    			 * understand the language definition because, normally, the order of tokens matters in Prism grammars.
+    			 *
+    			 * Therefore, it is encouraged to order overwriting tokens according to the positions of the overwritten tokens.
+    			 * Furthermore, all non-overwriting tokens should be placed after the overwriting ones.
+    			 *
+    			 * @param {string} id The id of the language to extend. This has to be a key in `Prism.languages`.
+    			 * @param {Grammar} redef The new tokens to append.
+    			 * @returns {Grammar} The new language created.
+    			 * @public
+    			 * @example
+    			 * Prism.languages['css-with-colors'] = Prism.languages.extend('css', {
+    			 *     // Prism.languages.css already has a 'comment' token, so this token will overwrite CSS' 'comment' token
+    			 *     // at its original position
+    			 *     'comment': { ... },
+    			 *     // CSS doesn't have a 'color' token, so this token will be appended
+    			 *     'color': /\b(?:red|green|blue)\b/
+    			 * });
+    			 */
+    			extend: function (id, redef) {
+    				var lang = _.util.clone(_.languages[id]);
+
+    				for (var key in redef) {
+    					lang[key] = redef[key];
+    				}
+
+    				return lang;
+    			},
+
+    			/**
+    			 * Inserts tokens _before_ another token in a language definition or any other grammar.
+    			 *
+    			 * ## Usage
+    			 *
+    			 * This helper method makes it easy to modify existing languages. For example, the CSS language definition
+    			 * not only defines CSS highlighting for CSS documents, but also needs to define highlighting for CSS embedded
+    			 * in HTML through `<style>` elements. To do this, it needs to modify `Prism.languages.markup` and add the
+    			 * appropriate tokens. However, `Prism.languages.markup` is a regular JavaScript object literal, so if you do
+    			 * this:
+    			 *
+    			 * ```js
+    			 * Prism.languages.markup.style = {
+    			 *     // token
+    			 * };
+    			 * ```
+    			 *
+    			 * then the `style` token will be added (and processed) at the end. `insertBefore` allows you to insert tokens
+    			 * before existing tokens. For the CSS example above, you would use it like this:
+    			 *
+    			 * ```js
+    			 * Prism.languages.insertBefore('markup', 'cdata', {
+    			 *     'style': {
+    			 *         // token
+    			 *     }
+    			 * });
+    			 * ```
+    			 *
+    			 * ## Special cases
+    			 *
+    			 * If the grammars of `inside` and `insert` have tokens with the same name, the tokens in `inside`'s grammar
+    			 * will be ignored.
+    			 *
+    			 * This behavior can be used to insert tokens after `before`:
+    			 *
+    			 * ```js
+    			 * Prism.languages.insertBefore('markup', 'comment', {
+    			 *     'comment': Prism.languages.markup.comment,
+    			 *     // tokens after 'comment'
+    			 * });
+    			 * ```
+    			 *
+    			 * ## Limitations
+    			 *
+    			 * The main problem `insertBefore` has to solve is iteration order. Since ES2015, the iteration order for object
+    			 * properties is guaranteed to be the insertion order (except for integer keys) but some browsers behave
+    			 * differently when keys are deleted and re-inserted. So `insertBefore` can't be implemented by temporarily
+    			 * deleting properties which is necessary to insert at arbitrary positions.
+    			 *
+    			 * To solve this problem, `insertBefore` doesn't actually insert the given tokens into the target object.
+    			 * Instead, it will create a new object and replace all references to the target object with the new one. This
+    			 * can be done without temporarily deleting properties, so the iteration order is well-defined.
+    			 *
+    			 * However, only references that can be reached from `Prism.languages` or `insert` will be replaced. I.e. if
+    			 * you hold the target object in a variable, then the value of the variable will not change.
+    			 *
+    			 * ```js
+    			 * var oldMarkup = Prism.languages.markup;
+    			 * var newMarkup = Prism.languages.insertBefore('markup', 'comment', { ... });
+    			 *
+    			 * assert(oldMarkup !== Prism.languages.markup);
+    			 * assert(newMarkup === Prism.languages.markup);
+    			 * ```
+    			 *
+    			 * @param {string} inside The property of `root` (e.g. a language id in `Prism.languages`) that contains the
+    			 * object to be modified.
+    			 * @param {string} before The key to insert before.
+    			 * @param {Grammar} insert An object containing the key-value pairs to be inserted.
+    			 * @param {Object<string, any>} [root] The object containing `inside`, i.e. the object that contains the
+    			 * object to be modified.
+    			 *
+    			 * Defaults to `Prism.languages`.
+    			 * @returns {Grammar} The new grammar object.
+    			 * @public
+    			 */
+    			insertBefore: function (inside, before, insert, root) {
+    				root = root || /** @type {any} */ (_.languages);
+    				var grammar = root[inside];
+    				/** @type {Grammar} */
+    				var ret = {};
+
+    				for (var token in grammar) {
+    					if (grammar.hasOwnProperty(token)) {
+
+    						if (token == before) {
+    							for (var newToken in insert) {
+    								if (insert.hasOwnProperty(newToken)) {
+    									ret[newToken] = insert[newToken];
+    								}
+    							}
+    						}
+
+    						// Do not insert token which also occur in insert. See #1525
+    						if (!insert.hasOwnProperty(token)) {
+    							ret[token] = grammar[token];
+    						}
+    					}
+    				}
+
+    				var old = root[inside];
+    				root[inside] = ret;
+
+    				// Update references in other language definitions
+    				_.languages.DFS(_.languages, function (key, value) {
+    					if (value === old && key != inside) {
+    						this[key] = ret;
+    					}
+    				});
+
+    				return ret;
+    			},
+
+    			// Traverse a language definition with Depth First Search
+    			DFS: function DFS(o, callback, type, visited) {
+    				visited = visited || {};
+
+    				var objId = _.util.objId;
+
+    				for (var i in o) {
+    					if (o.hasOwnProperty(i)) {
+    						callback.call(o, i, o[i], type || i);
+
+    						var property = o[i];
+    						var propertyType = _.util.type(property);
+
+    						if (propertyType === 'Object' && !visited[objId(property)]) {
+    							visited[objId(property)] = true;
+    							DFS(property, callback, null, visited);
+    						} else if (propertyType === 'Array' && !visited[objId(property)]) {
+    							visited[objId(property)] = true;
+    							DFS(property, callback, i, visited);
+    						}
+    					}
+    				}
+    			}
+    		},
+
+    		plugins: {},
+
+    		/**
+    		 * This is the most high-level function in Prism’s API.
+    		 * It fetches all the elements that have a `.language-xxxx` class and then calls {@link Prism.highlightElement} on
+    		 * each one of them.
+    		 *
+    		 * This is equivalent to `Prism.highlightAllUnder(document, async, callback)`.
+    		 *
+    		 * @param {boolean} [async=false] Same as in {@link Prism.highlightAllUnder}.
+    		 * @param {HighlightCallback} [callback] Same as in {@link Prism.highlightAllUnder}.
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		highlightAll: function (async, callback) {
+    			_.highlightAllUnder(document, async, callback);
+    		},
+
+    		/**
+    		 * Fetches all the descendants of `container` that have a `.language-xxxx` class and then calls
+    		 * {@link Prism.highlightElement} on each one of them.
+    		 *
+    		 * The following hooks will be run:
+    		 * 1. `before-highlightall`
+    		 * 2. `before-all-elements-highlight`
+    		 * 3. All hooks of {@link Prism.highlightElement} for each element.
+    		 *
+    		 * @param {ParentNode} container The root element, whose descendants that have a `.language-xxxx` class will be highlighted.
+    		 * @param {boolean} [async=false] Whether each element is to be highlighted asynchronously using Web Workers.
+    		 * @param {HighlightCallback} [callback] An optional callback to be invoked on each element after its highlighting is done.
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		highlightAllUnder: function (container, async, callback) {
+    			var env = {
+    				callback: callback,
+    				container: container,
+    				selector: 'code[class*="language-"], [class*="language-"] code, code[class*="lang-"], [class*="lang-"] code'
+    			};
+
+    			_.hooks.run('before-highlightall', env);
+
+    			env.elements = Array.prototype.slice.apply(env.container.querySelectorAll(env.selector));
+
+    			_.hooks.run('before-all-elements-highlight', env);
+
+    			for (var i = 0, element; (element = env.elements[i++]);) {
+    				_.highlightElement(element, async === true, env.callback);
+    			}
+    		},
+
+    		/**
+    		 * Highlights the code inside a single element.
+    		 *
+    		 * The following hooks will be run:
+    		 * 1. `before-sanity-check`
+    		 * 2. `before-highlight`
+    		 * 3. All hooks of {@link Prism.highlight}. These hooks will be run by an asynchronous worker if `async` is `true`.
+    		 * 4. `before-insert`
+    		 * 5. `after-highlight`
+    		 * 6. `complete`
+    		 *
+    		 * Some the above hooks will be skipped if the element doesn't contain any text or there is no grammar loaded for
+    		 * the element's language.
+    		 *
+    		 * @param {Element} element The element containing the code.
+    		 * It must have a class of `language-xxxx` to be processed, where `xxxx` is a valid language identifier.
+    		 * @param {boolean} [async=false] Whether the element is to be highlighted asynchronously using Web Workers
+    		 * to improve performance and avoid blocking the UI when highlighting very large chunks of code. This option is
+    		 * [disabled by default](https://prismjs.com/faq.html#why-is-asynchronous-highlighting-disabled-by-default).
+    		 *
+    		 * Note: All language definitions required to highlight the code must be included in the main `prism.js` file for
+    		 * asynchronous highlighting to work. You can build your own bundle on the
+    		 * [Download page](https://prismjs.com/download.html).
+    		 * @param {HighlightCallback} [callback] An optional callback to be invoked after the highlighting is done.
+    		 * Mostly useful when `async` is `true`, since in that case, the highlighting is done asynchronously.
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		highlightElement: function (element, async, callback) {
+    			// Find language
+    			var language = _.util.getLanguage(element);
+    			var grammar = _.languages[language];
+
+    			// Set language on the element, if not present
+    			_.util.setLanguage(element, language);
+
+    			// Set language on the parent, for styling
+    			var parent = element.parentElement;
+    			if (parent && parent.nodeName.toLowerCase() === 'pre') {
+    				_.util.setLanguage(parent, language);
+    			}
+
+    			var code = element.textContent;
+
+    			var env = {
+    				element: element,
+    				language: language,
+    				grammar: grammar,
+    				code: code
+    			};
+
+    			function insertHighlightedCode(highlightedCode) {
+    				env.highlightedCode = highlightedCode;
+
+    				_.hooks.run('before-insert', env);
+
+    				env.element.innerHTML = env.highlightedCode;
+
+    				_.hooks.run('after-highlight', env);
+    				_.hooks.run('complete', env);
+    				callback && callback.call(env.element);
+    			}
+
+    			_.hooks.run('before-sanity-check', env);
+
+    			// plugins may change/add the parent/element
+    			parent = env.element.parentElement;
+    			if (parent && parent.nodeName.toLowerCase() === 'pre' && !parent.hasAttribute('tabindex')) {
+    				parent.setAttribute('tabindex', '0');
+    			}
+
+    			if (!env.code) {
+    				_.hooks.run('complete', env);
+    				callback && callback.call(env.element);
+    				return;
+    			}
+
+    			_.hooks.run('before-highlight', env);
+
+    			if (!env.grammar) {
+    				insertHighlightedCode(_.util.encode(env.code));
+    				return;
+    			}
+
+    			if (async && _self.Worker) {
+    				var worker = new Worker(_.filename);
+
+    				worker.onmessage = function (evt) {
+    					insertHighlightedCode(evt.data);
+    				};
+
+    				worker.postMessage(JSON.stringify({
+    					language: env.language,
+    					code: env.code,
+    					immediateClose: true
+    				}));
+    			} else {
+    				insertHighlightedCode(_.highlight(env.code, env.grammar, env.language));
+    			}
+    		},
+
+    		/**
+    		 * Low-level function, only use if you know what you’re doing. It accepts a string of text as input
+    		 * and the language definitions to use, and returns a string with the HTML produced.
+    		 *
+    		 * The following hooks will be run:
+    		 * 1. `before-tokenize`
+    		 * 2. `after-tokenize`
+    		 * 3. `wrap`: On each {@link Token}.
+    		 *
+    		 * @param {string} text A string with the code to be highlighted.
+    		 * @param {Grammar} grammar An object containing the tokens to use.
+    		 *
+    		 * Usually a language definition like `Prism.languages.markup`.
+    		 * @param {string} language The name of the language definition passed to `grammar`.
+    		 * @returns {string} The highlighted HTML.
+    		 * @memberof Prism
+    		 * @public
+    		 * @example
+    		 * Prism.highlight('var foo = true;', Prism.languages.javascript, 'javascript');
+    		 */
+    		highlight: function (text, grammar, language) {
+    			var env = {
+    				code: text,
+    				grammar: grammar,
+    				language: language
+    			};
+    			_.hooks.run('before-tokenize', env);
+    			env.tokens = _.tokenize(env.code, env.grammar);
+    			_.hooks.run('after-tokenize', env);
+    			return Token.stringify(_.util.encode(env.tokens), env.language);
+    		},
+
+    		/**
+    		 * This is the heart of Prism, and the most low-level function you can use. It accepts a string of text as input
+    		 * and the language definitions to use, and returns an array with the tokenized code.
+    		 *
+    		 * When the language definition includes nested tokens, the function is called recursively on each of these tokens.
+    		 *
+    		 * This method could be useful in other contexts as well, as a very crude parser.
+    		 *
+    		 * @param {string} text A string with the code to be highlighted.
+    		 * @param {Grammar} grammar An object containing the tokens to use.
+    		 *
+    		 * Usually a language definition like `Prism.languages.markup`.
+    		 * @returns {TokenStream} An array of strings and tokens, a token stream.
+    		 * @memberof Prism
+    		 * @public
+    		 * @example
+    		 * let code = `var foo = 0;`;
+    		 * let tokens = Prism.tokenize(code, Prism.languages.javascript);
+    		 * tokens.forEach(token => {
+    		 *     if (token instanceof Prism.Token && token.type === 'number') {
+    		 *         console.log(`Found numeric literal: ${token.content}`);
+    		 *     }
+    		 * });
+    		 */
+    		tokenize: function (text, grammar) {
+    			var rest = grammar.rest;
+    			if (rest) {
+    				for (var token in rest) {
+    					grammar[token] = rest[token];
+    				}
+
+    				delete grammar.rest;
+    			}
+
+    			var tokenList = new LinkedList();
+    			addAfter(tokenList, tokenList.head, text);
+
+    			matchGrammar(text, tokenList, grammar, tokenList.head, 0);
+
+    			return toArray(tokenList);
+    		},
+
+    		/**
+    		 * @namespace
+    		 * @memberof Prism
+    		 * @public
+    		 */
+    		hooks: {
+    			all: {},
+
+    			/**
+    			 * Adds the given callback to the list of callbacks for the given hook.
+    			 *
+    			 * The callback will be invoked when the hook it is registered for is run.
+    			 * Hooks are usually directly run by a highlight function but you can also run hooks yourself.
+    			 *
+    			 * One callback function can be registered to multiple hooks and the same hook multiple times.
+    			 *
+    			 * @param {string} name The name of the hook.
+    			 * @param {HookCallback} callback The callback function which is given environment variables.
+    			 * @public
+    			 */
+    			add: function (name, callback) {
+    				var hooks = _.hooks.all;
+
+    				hooks[name] = hooks[name] || [];
+
+    				hooks[name].push(callback);
+    			},
+
+    			/**
+    			 * Runs a hook invoking all registered callbacks with the given environment variables.
+    			 *
+    			 * Callbacks will be invoked synchronously and in the order in which they were registered.
+    			 *
+    			 * @param {string} name The name of the hook.
+    			 * @param {Object<string, any>} env The environment variables of the hook passed to all callbacks registered.
+    			 * @public
+    			 */
+    			run: function (name, env) {
+    				var callbacks = _.hooks.all[name];
+
+    				if (!callbacks || !callbacks.length) {
+    					return;
+    				}
+
+    				for (var i = 0, callback; (callback = callbacks[i++]);) {
+    					callback(env);
+    				}
+    			}
+    		},
+
+    		Token: Token
+    	};
+    	_self.Prism = _;
+
+
+    	// Typescript note:
+    	// The following can be used to import the Token type in JSDoc:
+    	//
+    	//   @typedef {InstanceType<import("./prism-core")["Token"]>} Token
+
+    	/**
+    	 * Creates a new token.
+    	 *
+    	 * @param {string} type See {@link Token#type type}
+    	 * @param {string | TokenStream} content See {@link Token#content content}
+    	 * @param {string|string[]} [alias] The alias(es) of the token.
+    	 * @param {string} [matchedStr=""] A copy of the full string this token was created from.
+    	 * @class
+    	 * @global
+    	 * @public
+    	 */
+    	function Token(type, content, alias, matchedStr) {
+    		/**
+    		 * The type of the token.
+    		 *
+    		 * This is usually the key of a pattern in a {@link Grammar}.
+    		 *
+    		 * @type {string}
+    		 * @see GrammarToken
+    		 * @public
+    		 */
+    		this.type = type;
+    		/**
+    		 * The strings or tokens contained by this token.
+    		 *
+    		 * This will be a token stream if the pattern matched also defined an `inside` grammar.
+    		 *
+    		 * @type {string | TokenStream}
+    		 * @public
+    		 */
+    		this.content = content;
+    		/**
+    		 * The alias(es) of the token.
+    		 *
+    		 * @type {string|string[]}
+    		 * @see GrammarToken
+    		 * @public
+    		 */
+    		this.alias = alias;
+    		// Copy of the full string this token was created from
+    		this.length = (matchedStr || '').length | 0;
+    	}
+
+    	/**
+    	 * A token stream is an array of strings and {@link Token Token} objects.
+    	 *
+    	 * Token streams have to fulfill a few properties that are assumed by most functions (mostly internal ones) that process
+    	 * them.
+    	 *
+    	 * 1. No adjacent strings.
+    	 * 2. No empty strings.
+    	 *
+    	 *    The only exception here is the token stream that only contains the empty string and nothing else.
+    	 *
+    	 * @typedef {Array<string | Token>} TokenStream
+    	 * @global
+    	 * @public
+    	 */
+
+    	/**
+    	 * Converts the given token or token stream to an HTML representation.
+    	 *
+    	 * The following hooks will be run:
+    	 * 1. `wrap`: On each {@link Token}.
+    	 *
+    	 * @param {string | Token | TokenStream} o The token or token stream to be converted.
+    	 * @param {string} language The name of current language.
+    	 * @returns {string} The HTML representation of the token or token stream.
+    	 * @memberof Token
+    	 * @static
+    	 */
+    	Token.stringify = function stringify(o, language) {
+    		if (typeof o == 'string') {
+    			return o;
+    		}
+    		if (Array.isArray(o)) {
+    			var s = '';
+    			o.forEach(function (e) {
+    				s += stringify(e, language);
+    			});
+    			return s;
+    		}
+
+    		var env = {
+    			type: o.type,
+    			content: stringify(o.content, language),
+    			tag: 'span',
+    			classes: ['token', o.type],
+    			attributes: {},
+    			language: language
+    		};
+
+    		var aliases = o.alias;
+    		if (aliases) {
+    			if (Array.isArray(aliases)) {
+    				Array.prototype.push.apply(env.classes, aliases);
+    			} else {
+    				env.classes.push(aliases);
+    			}
+    		}
+
+    		_.hooks.run('wrap', env);
+
+    		var attributes = '';
+    		for (var name in env.attributes) {
+    			attributes += ' ' + name + '="' + (env.attributes[name] || '').replace(/"/g, '&quot;') + '"';
+    		}
+
+    		return '<' + env.tag + ' class="' + env.classes.join(' ') + '"' + attributes + '>' + env.content + '</' + env.tag + '>';
+    	};
+
+    	/**
+    	 * @param {RegExp} pattern
+    	 * @param {number} pos
+    	 * @param {string} text
+    	 * @param {boolean} lookbehind
+    	 * @returns {RegExpExecArray | null}
+    	 */
+    	function matchPattern(pattern, pos, text, lookbehind) {
+    		pattern.lastIndex = pos;
+    		var match = pattern.exec(text);
+    		if (match && lookbehind && match[1]) {
+    			// change the match to remove the text matched by the Prism lookbehind group
+    			var lookbehindLength = match[1].length;
+    			match.index += lookbehindLength;
+    			match[0] = match[0].slice(lookbehindLength);
+    		}
+    		return match;
+    	}
+
+    	/**
+    	 * @param {string} text
+    	 * @param {LinkedList<string | Token>} tokenList
+    	 * @param {any} grammar
+    	 * @param {LinkedListNode<string | Token>} startNode
+    	 * @param {number} startPos
+    	 * @param {RematchOptions} [rematch]
+    	 * @returns {void}
+    	 * @private
+    	 *
+    	 * @typedef RematchOptions
+    	 * @property {string} cause
+    	 * @property {number} reach
+    	 */
+    	function matchGrammar(text, tokenList, grammar, startNode, startPos, rematch) {
+    		for (var token in grammar) {
+    			if (!grammar.hasOwnProperty(token) || !grammar[token]) {
+    				continue;
+    			}
+
+    			var patterns = grammar[token];
+    			patterns = Array.isArray(patterns) ? patterns : [patterns];
+
+    			for (var j = 0; j < patterns.length; ++j) {
+    				if (rematch && rematch.cause == token + ',' + j) {
+    					return;
+    				}
+
+    				var patternObj = patterns[j];
+    				var inside = patternObj.inside;
+    				var lookbehind = !!patternObj.lookbehind;
+    				var greedy = !!patternObj.greedy;
+    				var alias = patternObj.alias;
+
+    				if (greedy && !patternObj.pattern.global) {
+    					// Without the global flag, lastIndex won't work
+    					var flags = patternObj.pattern.toString().match(/[imsuy]*$/)[0];
+    					patternObj.pattern = RegExp(patternObj.pattern.source, flags + 'g');
+    				}
+
+    				/** @type {RegExp} */
+    				var pattern = patternObj.pattern || patternObj;
+
+    				for ( // iterate the token list and keep track of the current token/string position
+    					var currentNode = startNode.next, pos = startPos;
+    					currentNode !== tokenList.tail;
+    					pos += currentNode.value.length, currentNode = currentNode.next
+    				) {
+
+    					if (rematch && pos >= rematch.reach) {
+    						break;
+    					}
+
+    					var str = currentNode.value;
+
+    					if (tokenList.length > text.length) {
+    						// Something went terribly wrong, ABORT, ABORT!
+    						return;
+    					}
+
+    					if (str instanceof Token) {
+    						continue;
+    					}
+
+    					var removeCount = 1; // this is the to parameter of removeBetween
+    					var match;
+
+    					if (greedy) {
+    						match = matchPattern(pattern, pos, text, lookbehind);
+    						if (!match || match.index >= text.length) {
+    							break;
+    						}
+
+    						var from = match.index;
+    						var to = match.index + match[0].length;
+    						var p = pos;
+
+    						// find the node that contains the match
+    						p += currentNode.value.length;
+    						while (from >= p) {
+    							currentNode = currentNode.next;
+    							p += currentNode.value.length;
+    						}
+    						// adjust pos (and p)
+    						p -= currentNode.value.length;
+    						pos = p;
+
+    						// the current node is a Token, then the match starts inside another Token, which is invalid
+    						if (currentNode.value instanceof Token) {
+    							continue;
+    						}
+
+    						// find the last node which is affected by this match
+    						for (
+    							var k = currentNode;
+    							k !== tokenList.tail && (p < to || typeof k.value === 'string');
+    							k = k.next
+    						) {
+    							removeCount++;
+    							p += k.value.length;
+    						}
+    						removeCount--;
+
+    						// replace with the new match
+    						str = text.slice(pos, p);
+    						match.index -= pos;
+    					} else {
+    						match = matchPattern(pattern, 0, str, lookbehind);
+    						if (!match) {
+    							continue;
+    						}
+    					}
+
+    					// eslint-disable-next-line no-redeclare
+    					var from = match.index;
+    					var matchStr = match[0];
+    					var before = str.slice(0, from);
+    					var after = str.slice(from + matchStr.length);
+
+    					var reach = pos + str.length;
+    					if (rematch && reach > rematch.reach) {
+    						rematch.reach = reach;
+    					}
+
+    					var removeFrom = currentNode.prev;
+
+    					if (before) {
+    						removeFrom = addAfter(tokenList, removeFrom, before);
+    						pos += before.length;
+    					}
+
+    					removeRange(tokenList, removeFrom, removeCount);
+
+    					var wrapped = new Token(token, inside ? _.tokenize(matchStr, inside) : matchStr, alias, matchStr);
+    					currentNode = addAfter(tokenList, removeFrom, wrapped);
+
+    					if (after) {
+    						addAfter(tokenList, currentNode, after);
+    					}
+
+    					if (removeCount > 1) {
+    						// at least one Token object was removed, so we have to do some rematching
+    						// this can only happen if the current pattern is greedy
+
+    						/** @type {RematchOptions} */
+    						var nestedRematch = {
+    							cause: token + ',' + j,
+    							reach: reach
+    						};
+    						matchGrammar(text, tokenList, grammar, currentNode.prev, pos, nestedRematch);
+
+    						// the reach might have been extended because of the rematching
+    						if (rematch && nestedRematch.reach > rematch.reach) {
+    							rematch.reach = nestedRematch.reach;
+    						}
+    					}
+    				}
+    			}
+    		}
+    	}
+
+    	/**
+    	 * @typedef LinkedListNode
+    	 * @property {T} value
+    	 * @property {LinkedListNode<T> | null} prev The previous node.
+    	 * @property {LinkedListNode<T> | null} next The next node.
+    	 * @template T
+    	 * @private
+    	 */
+
+    	/**
+    	 * @template T
+    	 * @private
+    	 */
+    	function LinkedList() {
+    		/** @type {LinkedListNode<T>} */
+    		var head = { value: null, prev: null, next: null };
+    		/** @type {LinkedListNode<T>} */
+    		var tail = { value: null, prev: head, next: null };
+    		head.next = tail;
+
+    		/** @type {LinkedListNode<T>} */
+    		this.head = head;
+    		/** @type {LinkedListNode<T>} */
+    		this.tail = tail;
+    		this.length = 0;
+    	}
+
+    	/**
+    	 * Adds a new node with the given value to the list.
+    	 *
+    	 * @param {LinkedList<T>} list
+    	 * @param {LinkedListNode<T>} node
+    	 * @param {T} value
+    	 * @returns {LinkedListNode<T>} The added node.
+    	 * @template T
+    	 */
+    	function addAfter(list, node, value) {
+    		// assumes that node != list.tail && values.length >= 0
+    		var next = node.next;
+
+    		var newNode = { value: value, prev: node, next: next };
+    		node.next = newNode;
+    		next.prev = newNode;
+    		list.length++;
+
+    		return newNode;
+    	}
+    	/**
+    	 * Removes `count` nodes after the given node. The given node will not be removed.
+    	 *
+    	 * @param {LinkedList<T>} list
+    	 * @param {LinkedListNode<T>} node
+    	 * @param {number} count
+    	 * @template T
+    	 */
+    	function removeRange(list, node, count) {
+    		var next = node.next;
+    		for (var i = 0; i < count && next !== list.tail; i++) {
+    			next = next.next;
+    		}
+    		node.next = next;
+    		next.prev = node;
+    		list.length -= i;
+    	}
+    	/**
+    	 * @param {LinkedList<T>} list
+    	 * @returns {T[]}
+    	 * @template T
+    	 */
+    	function toArray(list) {
+    		var array = [];
+    		var node = list.head.next;
+    		while (node !== list.tail) {
+    			array.push(node.value);
+    			node = node.next;
+    		}
+    		return array;
+    	}
+
+
+    	if (!_self.document) {
+    		if (!_self.addEventListener) {
+    			// in Node.js
+    			return _;
+    		}
+
+    		if (!_.disableWorkerMessageHandler) {
+    			// In worker
+    			_self.addEventListener('message', function (evt) {
+    				var message = JSON.parse(evt.data);
+    				var lang = message.language;
+    				var code = message.code;
+    				var immediateClose = message.immediateClose;
+
+    				_self.postMessage(_.highlight(code, _.languages[lang], lang));
+    				if (immediateClose) {
+    					_self.close();
+    				}
+    			}, false);
+    		}
+
+    		return _;
+    	}
+
+    	// Get current script and highlight
+    	var script = _.util.currentScript();
+
+    	if (script) {
+    		_.filename = script.src;
+
+    		if (script.hasAttribute('data-manual')) {
+    			_.manual = true;
+    		}
+    	}
+
+    	function highlightAutomaticallyCallback() {
+    		if (!_.manual) {
+    			_.highlightAll();
+    		}
+    	}
+
+    	if (!_.manual) {
+    		// If the document state is "loading", then we'll use DOMContentLoaded.
+    		// If the document state is "interactive" and the prism.js script is deferred, then we'll also use the
+    		// DOMContentLoaded event because there might be some plugins or languages which have also been deferred and they
+    		// might take longer one animation frame to execute which can create a race condition where only some plugins have
+    		// been loaded when Prism.highlightAll() is executed, depending on how fast resources are loaded.
+    		// See https://github.com/PrismJS/prism/issues/2102
+    		var readyState = document.readyState;
+    		if (readyState === 'loading' || readyState === 'interactive' && script && script.defer) {
+    			document.addEventListener('DOMContentLoaded', highlightAutomaticallyCallback);
+    		} else {
+    			if (window.requestAnimationFrame) {
+    				window.requestAnimationFrame(highlightAutomaticallyCallback);
+    			} else {
+    				window.setTimeout(highlightAutomaticallyCallback, 16);
+    			}
+    		}
+    	}
+
+    	return _;
+
+    }(_self));
+
+    if (module.exports) {
+    	module.exports = Prism;
+    }
+
+    // hack for components to work correctly in node.js
+    if (typeof commonjsGlobal !== 'undefined') {
+    	commonjsGlobal.Prism = Prism;
+    }
+
+    // some additional documentation/types
+
+    /**
+     * The expansion of a simple `RegExp` literal to support additional properties.
+     *
+     * @typedef GrammarToken
+     * @property {RegExp} pattern The regular expression of the token.
+     * @property {boolean} [lookbehind=false] If `true`, then the first capturing group of `pattern` will (effectively)
+     * behave as a lookbehind group meaning that the captured text will not be part of the matched text of the new token.
+     * @property {boolean} [greedy=false] Whether the token is greedy.
+     * @property {string|string[]} [alias] An optional alias or list of aliases.
+     * @property {Grammar} [inside] The nested grammar of this token.
+     *
+     * The `inside` grammar will be used to tokenize the text value of each token of this kind.
+     *
+     * This can be used to make nested and even recursive language definitions.
+     *
+     * Note: This can cause infinite recursion. Be careful when you embed different languages or even the same language into
+     * each another.
+     * @global
+     * @public
+     */
+
+    /**
+     * @typedef Grammar
+     * @type {Object<string, RegExp | GrammarToken | Array<RegExp | GrammarToken>>}
+     * @property {Grammar} [rest] An optional grammar object that will be appended to this grammar.
+     * @global
+     * @public
+     */
+
+    /**
+     * A function which will invoked after an element was successfully highlighted.
+     *
+     * @callback HighlightCallback
+     * @param {Element} element The element successfully highlighted.
+     * @returns {void}
+     * @global
+     * @public
+     */
+
+    /**
+     * @callback HookCallback
+     * @param {Object<string, any>} env The environment variables of the hook.
+     * @returns {void}
+     * @global
+     * @public
+     */
+
+
+    /* **********************************************
+         Begin prism-markup.js
+    ********************************************** */
+
+    Prism.languages.markup = {
+    	'comment': {
+    		pattern: /<!--(?:(?!<!--)[\s\S])*?-->/,
+    		greedy: true
+    	},
+    	'prolog': {
+    		pattern: /<\?[\s\S]+?\?>/,
+    		greedy: true
+    	},
+    	'doctype': {
+    		// https://www.w3.org/TR/xml/#NT-doctypedecl
+    		pattern: /<!DOCTYPE(?:[^>"'[\]]|"[^"]*"|'[^']*')+(?:\[(?:[^<"'\]]|"[^"]*"|'[^']*'|<(?!!--)|<!--(?:[^-]|-(?!->))*-->)*\]\s*)?>/i,
+    		greedy: true,
+    		inside: {
+    			'internal-subset': {
+    				pattern: /(^[^\[]*\[)[\s\S]+(?=\]>$)/,
+    				lookbehind: true,
+    				greedy: true,
+    				inside: null // see below
+    			},
+    			'string': {
+    				pattern: /"[^"]*"|'[^']*'/,
+    				greedy: true
+    			},
+    			'punctuation': /^<!|>$|[[\]]/,
+    			'doctype-tag': /^DOCTYPE/i,
+    			'name': /[^\s<>'"]+/
+    		}
+    	},
+    	'cdata': {
+    		pattern: /<!\[CDATA\[[\s\S]*?\]\]>/i,
+    		greedy: true
+    	},
+    	'tag': {
+    		pattern: /<\/?(?!\d)[^\s>\/=$<%]+(?:\s(?:\s*[^\s>\/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s'">=]+(?=[\s>]))|(?=[\s/>])))+)?\s*\/?>/,
+    		greedy: true,
+    		inside: {
+    			'tag': {
+    				pattern: /^<\/?[^\s>\/]+/,
+    				inside: {
+    					'punctuation': /^<\/?/,
+    					'namespace': /^[^\s>\/:]+:/
+    				}
+    			},
+    			'special-attr': [],
+    			'attr-value': {
+    				pattern: /=\s*(?:"[^"]*"|'[^']*'|[^\s'">=]+)/,
+    				inside: {
+    					'punctuation': [
+    						{
+    							pattern: /^=/,
+    							alias: 'attr-equals'
+    						},
+    						/"|'/
+    					]
+    				}
+    			},
+    			'punctuation': /\/?>/,
+    			'attr-name': {
+    				pattern: /[^\s>\/]+/,
+    				inside: {
+    					'namespace': /^[^\s>\/:]+:/
+    				}
+    			}
+
+    		}
+    	},
+    	'entity': [
+    		{
+    			pattern: /&[\da-z]{1,8};/i,
+    			alias: 'named-entity'
+    		},
+    		/&#x?[\da-f]{1,8};/i
+    	]
+    };
+
+    Prism.languages.markup['tag'].inside['attr-value'].inside['entity'] =
+    	Prism.languages.markup['entity'];
+    Prism.languages.markup['doctype'].inside['internal-subset'].inside = Prism.languages.markup;
+
+    // Plugin to make entity title show the real entity, idea by Roman Komarov
+    Prism.hooks.add('wrap', function (env) {
+
+    	if (env.type === 'entity') {
+    		env.attributes['title'] = env.content.replace(/&amp;/, '&');
+    	}
+    });
+
+    Object.defineProperty(Prism.languages.markup.tag, 'addInlined', {
+    	/**
+    	 * Adds an inlined language to markup.
+    	 *
+    	 * An example of an inlined language is CSS with `<style>` tags.
+    	 *
+    	 * @param {string} tagName The name of the tag that contains the inlined language. This name will be treated as
+    	 * case insensitive.
+    	 * @param {string} lang The language key.
+    	 * @example
+    	 * addInlined('style', 'css');
+    	 */
+    	value: function addInlined(tagName, lang) {
+    		var includedCdataInside = {};
+    		includedCdataInside['language-' + lang] = {
+    			pattern: /(^<!\[CDATA\[)[\s\S]+?(?=\]\]>$)/i,
+    			lookbehind: true,
+    			inside: Prism.languages[lang]
+    		};
+    		includedCdataInside['cdata'] = /^<!\[CDATA\[|\]\]>$/i;
+
+    		var inside = {
+    			'included-cdata': {
+    				pattern: /<!\[CDATA\[[\s\S]*?\]\]>/i,
+    				inside: includedCdataInside
+    			}
+    		};
+    		inside['language-' + lang] = {
+    			pattern: /[\s\S]+/,
+    			inside: Prism.languages[lang]
+    		};
+
+    		var def = {};
+    		def[tagName] = {
+    			pattern: RegExp(/(<__[^>]*>)(?:<!\[CDATA\[(?:[^\]]|\](?!\]>))*\]\]>|(?!<!\[CDATA\[)[\s\S])*?(?=<\/__>)/.source.replace(/__/g, function () { return tagName; }), 'i'),
+    			lookbehind: true,
+    			greedy: true,
+    			inside: inside
+    		};
+
+    		Prism.languages.insertBefore('markup', 'cdata', def);
+    	}
+    });
+    Object.defineProperty(Prism.languages.markup.tag, 'addAttribute', {
+    	/**
+    	 * Adds an pattern to highlight languages embedded in HTML attributes.
+    	 *
+    	 * An example of an inlined language is CSS with `style` attributes.
+    	 *
+    	 * @param {string} attrName The name of the tag that contains the inlined language. This name will be treated as
+    	 * case insensitive.
+    	 * @param {string} lang The language key.
+    	 * @example
+    	 * addAttribute('style', 'css');
+    	 */
+    	value: function (attrName, lang) {
+    		Prism.languages.markup.tag.inside['special-attr'].push({
+    			pattern: RegExp(
+    				/(^|["'\s])/.source + '(?:' + attrName + ')' + /\s*=\s*(?:"[^"]*"|'[^']*'|[^\s'">=]+(?=[\s>]))/.source,
+    				'i'
+    			),
+    			lookbehind: true,
+    			inside: {
+    				'attr-name': /^[^\s=]+/,
+    				'attr-value': {
+    					pattern: /=[\s\S]+/,
+    					inside: {
+    						'value': {
+    							pattern: /(^=\s*(["']|(?!["'])))\S[\s\S]*(?=\2$)/,
+    							lookbehind: true,
+    							alias: [lang, 'language-' + lang],
+    							inside: Prism.languages[lang]
+    						},
+    						'punctuation': [
+    							{
+    								pattern: /^=/,
+    								alias: 'attr-equals'
+    							},
+    							/"|'/
+    						]
+    					}
+    				}
+    			}
+    		});
+    	}
+    });
+
+    Prism.languages.html = Prism.languages.markup;
+    Prism.languages.mathml = Prism.languages.markup;
+    Prism.languages.svg = Prism.languages.markup;
+
+    Prism.languages.xml = Prism.languages.extend('markup', {});
+    Prism.languages.ssml = Prism.languages.xml;
+    Prism.languages.atom = Prism.languages.xml;
+    Prism.languages.rss = Prism.languages.xml;
+
+
+    /* **********************************************
+         Begin prism-css.js
+    ********************************************** */
+
+    (function (Prism) {
+
+    	var string = /(?:"(?:\\(?:\r\n|[\s\S])|[^"\\\r\n])*"|'(?:\\(?:\r\n|[\s\S])|[^'\\\r\n])*')/;
+
+    	Prism.languages.css = {
+    		'comment': /\/\*[\s\S]*?\*\//,
+    		'atrule': {
+    			pattern: /@[\w-](?:[^;{\s]|\s+(?![\s{]))*(?:;|(?=\s*\{))/,
+    			inside: {
+    				'rule': /^@[\w-]+/,
+    				'selector-function-argument': {
+    					pattern: /(\bselector\s*\(\s*(?![\s)]))(?:[^()\s]|\s+(?![\s)])|\((?:[^()]|\([^()]*\))*\))+(?=\s*\))/,
+    					lookbehind: true,
+    					alias: 'selector'
+    				},
+    				'keyword': {
+    					pattern: /(^|[^\w-])(?:and|not|only|or)(?![\w-])/,
+    					lookbehind: true
+    				}
+    				// See rest below
+    			}
+    		},
+    		'url': {
+    			// https://drafts.csswg.org/css-values-3/#urls
+    			pattern: RegExp('\\burl\\((?:' + string.source + '|' + /(?:[^\\\r\n()"']|\\[\s\S])*/.source + ')\\)', 'i'),
+    			greedy: true,
+    			inside: {
+    				'function': /^url/i,
+    				'punctuation': /^\(|\)$/,
+    				'string': {
+    					pattern: RegExp('^' + string.source + '$'),
+    					alias: 'url'
+    				}
+    			}
+    		},
+    		'selector': {
+    			pattern: RegExp('(^|[{}\\s])[^{}\\s](?:[^{};"\'\\s]|\\s+(?![\\s{])|' + string.source + ')*(?=\\s*\\{)'),
+    			lookbehind: true
+    		},
+    		'string': {
+    			pattern: string,
+    			greedy: true
+    		},
+    		'property': {
+    			pattern: /(^|[^-\w\xA0-\uFFFF])(?!\s)[-_a-z\xA0-\uFFFF](?:(?!\s)[-\w\xA0-\uFFFF])*(?=\s*:)/i,
+    			lookbehind: true
+    		},
+    		'important': /!important\b/i,
+    		'function': {
+    			pattern: /(^|[^-a-z0-9])[-a-z0-9]+(?=\()/i,
+    			lookbehind: true
+    		},
+    		'punctuation': /[(){};:,]/
+    	};
+
+    	Prism.languages.css['atrule'].inside.rest = Prism.languages.css;
+
+    	var markup = Prism.languages.markup;
+    	if (markup) {
+    		markup.tag.addInlined('style', 'css');
+    		markup.tag.addAttribute('style', 'css');
+    	}
+
+    }(Prism));
+
+
+    /* **********************************************
+         Begin prism-clike.js
+    ********************************************** */
+
+    Prism.languages.clike = {
+    	'comment': [
+    		{
+    			pattern: /(^|[^\\])\/\*[\s\S]*?(?:\*\/|$)/,
+    			lookbehind: true,
+    			greedy: true
+    		},
+    		{
+    			pattern: /(^|[^\\:])\/\/.*/,
+    			lookbehind: true,
+    			greedy: true
+    		}
+    	],
+    	'string': {
+    		pattern: /(["'])(?:\\(?:\r\n|[\s\S])|(?!\1)[^\\\r\n])*\1/,
+    		greedy: true
+    	},
+    	'class-name': {
+    		pattern: /(\b(?:class|extends|implements|instanceof|interface|new|trait)\s+|\bcatch\s+\()[\w.\\]+/i,
+    		lookbehind: true,
+    		inside: {
+    			'punctuation': /[.\\]/
+    		}
+    	},
+    	'keyword': /\b(?:break|catch|continue|do|else|finally|for|function|if|in|instanceof|new|null|return|throw|try|while)\b/,
+    	'boolean': /\b(?:false|true)\b/,
+    	'function': /\b\w+(?=\()/,
+    	'number': /\b0x[\da-f]+\b|(?:\b\d+(?:\.\d*)?|\B\.\d+)(?:e[+-]?\d+)?/i,
+    	'operator': /[<>]=?|[!=]=?=?|--?|\+\+?|&&?|\|\|?|[?*/~^%]/,
+    	'punctuation': /[{}[\];(),.:]/
+    };
+
+
+    /* **********************************************
+         Begin prism-javascript.js
+    ********************************************** */
+
+    Prism.languages.javascript = Prism.languages.extend('clike', {
+    	'class-name': [
+    		Prism.languages.clike['class-name'],
+    		{
+    			pattern: /(^|[^$\w\xA0-\uFFFF])(?!\s)[_$A-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*(?=\.(?:constructor|prototype))/,
+    			lookbehind: true
+    		}
+    	],
+    	'keyword': [
+    		{
+    			pattern: /((?:^|\})\s*)catch\b/,
+    			lookbehind: true
+    		},
+    		{
+    			pattern: /(^|[^.]|\.\.\.\s*)\b(?:as|assert(?=\s*\{)|async(?=\s*(?:function\b|\(|[$\w\xA0-\uFFFF]|$))|await|break|case|class|const|continue|debugger|default|delete|do|else|enum|export|extends|finally(?=\s*(?:\{|$))|for|from(?=\s*(?:['"]|$))|function|(?:get|set)(?=\s*(?:[#\[$\w\xA0-\uFFFF]|$))|if|implements|import|in|instanceof|interface|let|new|null|of|package|private|protected|public|return|static|super|switch|this|throw|try|typeof|undefined|var|void|while|with|yield)\b/,
+    			lookbehind: true
+    		},
+    	],
+    	// Allow for all non-ASCII characters (See http://stackoverflow.com/a/2008444)
+    	'function': /#?(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*(?=\s*(?:\.\s*(?:apply|bind|call)\s*)?\()/,
+    	'number': {
+    		pattern: RegExp(
+    			/(^|[^\w$])/.source +
+    			'(?:' +
+    			(
+    				// constant
+    				/NaN|Infinity/.source +
+    				'|' +
+    				// binary integer
+    				/0[bB][01]+(?:_[01]+)*n?/.source +
+    				'|' +
+    				// octal integer
+    				/0[oO][0-7]+(?:_[0-7]+)*n?/.source +
+    				'|' +
+    				// hexadecimal integer
+    				/0[xX][\dA-Fa-f]+(?:_[\dA-Fa-f]+)*n?/.source +
+    				'|' +
+    				// decimal bigint
+    				/\d+(?:_\d+)*n/.source +
+    				'|' +
+    				// decimal number (integer or float) but no bigint
+    				/(?:\d+(?:_\d+)*(?:\.(?:\d+(?:_\d+)*)?)?|\.\d+(?:_\d+)*)(?:[Ee][+-]?\d+(?:_\d+)*)?/.source
+    			) +
+    			')' +
+    			/(?![\w$])/.source
+    		),
+    		lookbehind: true
+    	},
+    	'operator': /--|\+\+|\*\*=?|=>|&&=?|\|\|=?|[!=]==|<<=?|>>>?=?|[-+*/%&|^!=<>]=?|\.{3}|\?\?=?|\?\.?|[~:]/
+    });
+
+    Prism.languages.javascript['class-name'][0].pattern = /(\b(?:class|extends|implements|instanceof|interface|new)\s+)[\w.\\]+/;
+
+    Prism.languages.insertBefore('javascript', 'keyword', {
+    	'regex': {
+    		// eslint-disable-next-line regexp/no-dupe-characters-character-class
+    		pattern: /((?:^|[^$\w\xA0-\uFFFF."'\])\s]|\b(?:return|yield))\s*)\/(?:\[(?:[^\]\\\r\n]|\\.)*\]|\\.|[^/\\\[\r\n])+\/[dgimyus]{0,7}(?=(?:\s|\/\*(?:[^*]|\*(?!\/))*\*\/)*(?:$|[\r\n,.;:})\]]|\/\/))/,
+    		lookbehind: true,
+    		greedy: true,
+    		inside: {
+    			'regex-source': {
+    				pattern: /^(\/)[\s\S]+(?=\/[a-z]*$)/,
+    				lookbehind: true,
+    				alias: 'language-regex',
+    				inside: Prism.languages.regex
+    			},
+    			'regex-delimiter': /^\/|\/$/,
+    			'regex-flags': /^[a-z]+$/,
+    		}
+    	},
+    	// This must be declared before keyword because we use "function" inside the look-forward
+    	'function-variable': {
+    		pattern: /#?(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*(?=\s*[=:]\s*(?:async\s*)?(?:\bfunction\b|(?:\((?:[^()]|\([^()]*\))*\)|(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*)\s*=>))/,
+    		alias: 'function'
+    	},
+    	'parameter': [
+    		{
+    			pattern: /(function(?:\s+(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*)?\s*\(\s*)(?!\s)(?:[^()\s]|\s+(?![\s)])|\([^()]*\))+(?=\s*\))/,
+    			lookbehind: true,
+    			inside: Prism.languages.javascript
+    		},
+    		{
+    			pattern: /(^|[^$\w\xA0-\uFFFF])(?!\s)[_$a-z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*(?=\s*=>)/i,
+    			lookbehind: true,
+    			inside: Prism.languages.javascript
+    		},
+    		{
+    			pattern: /(\(\s*)(?!\s)(?:[^()\s]|\s+(?![\s)])|\([^()]*\))+(?=\s*\)\s*=>)/,
+    			lookbehind: true,
+    			inside: Prism.languages.javascript
+    		},
+    		{
+    			pattern: /((?:\b|\s|^)(?!(?:as|async|await|break|case|catch|class|const|continue|debugger|default|delete|do|else|enum|export|extends|finally|for|from|function|get|if|implements|import|in|instanceof|interface|let|new|null|of|package|private|protected|public|return|set|static|super|switch|this|throw|try|typeof|undefined|var|void|while|with|yield)(?![$\w\xA0-\uFFFF]))(?:(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*\s*)\(\s*|\]\s*\(\s*)(?!\s)(?:[^()\s]|\s+(?![\s)])|\([^()]*\))+(?=\s*\)\s*\{)/,
+    			lookbehind: true,
+    			inside: Prism.languages.javascript
+    		}
+    	],
+    	'constant': /\b[A-Z](?:[A-Z_]|\dx?)*\b/
+    });
+
+    Prism.languages.insertBefore('javascript', 'string', {
+    	'hashbang': {
+    		pattern: /^#!.*/,
+    		greedy: true,
+    		alias: 'comment'
+    	},
+    	'template-string': {
+    		pattern: /`(?:\\[\s\S]|\$\{(?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})+\}|(?!\$\{)[^\\`])*`/,
+    		greedy: true,
+    		inside: {
+    			'template-punctuation': {
+    				pattern: /^`|`$/,
+    				alias: 'string'
+    			},
+    			'interpolation': {
+    				pattern: /((?:^|[^\\])(?:\\{2})*)\$\{(?:[^{}]|\{(?:[^{}]|\{[^}]*\})*\})+\}/,
+    				lookbehind: true,
+    				inside: {
+    					'interpolation-punctuation': {
+    						pattern: /^\$\{|\}$/,
+    						alias: 'punctuation'
+    					},
+    					rest: Prism.languages.javascript
+    				}
+    			},
+    			'string': /[\s\S]+/
+    		}
+    	},
+    	'string-property': {
+    		pattern: /((?:^|[,{])[ \t]*)(["'])(?:\\(?:\r\n|[\s\S])|(?!\2)[^\\\r\n])*\2(?=\s*:)/m,
+    		lookbehind: true,
+    		greedy: true,
+    		alias: 'property'
+    	}
+    });
+
+    Prism.languages.insertBefore('javascript', 'operator', {
+    	'literal-property': {
+    		pattern: /((?:^|[,{])[ \t]*)(?!\s)[_$a-zA-Z\xA0-\uFFFF](?:(?!\s)[$\w\xA0-\uFFFF])*(?=\s*:)/m,
+    		lookbehind: true,
+    		alias: 'property'
+    	},
+    });
+
+    if (Prism.languages.markup) {
+    	Prism.languages.markup.tag.addInlined('script', 'javascript');
+
+    	// add attribute support for all DOM events.
+    	// https://developer.mozilla.org/en-US/docs/Web/Events#Standard_events
+    	Prism.languages.markup.tag.addAttribute(
+    		/on(?:abort|blur|change|click|composition(?:end|start|update)|dblclick|error|focus(?:in|out)?|key(?:down|up)|load|mouse(?:down|enter|leave|move|out|over|up)|reset|resize|scroll|select|slotchange|submit|unload|wheel)/.source,
+    		'javascript'
+    	);
+    }
+
+    Prism.languages.js = Prism.languages.javascript;
+
+
+    /* **********************************************
+         Begin prism-file-highlight.js
+    ********************************************** */
+
+    (function () {
+
+    	if (typeof Prism === 'undefined' || typeof document === 'undefined') {
+    		return;
+    	}
+
+    	// https://developer.mozilla.org/en-US/docs/Web/API/Element/matches#Polyfill
+    	if (!Element.prototype.matches) {
+    		Element.prototype.matches = Element.prototype.msMatchesSelector || Element.prototype.webkitMatchesSelector;
+    	}
+
+    	var LOADING_MESSAGE = 'Loading…';
+    	var FAILURE_MESSAGE = function (status, message) {
+    		return '✖ Error ' + status + ' while fetching file: ' + message;
+    	};
+    	var FAILURE_EMPTY_MESSAGE = '✖ Error: File does not exist or is empty';
+
+    	var EXTENSIONS = {
+    		'js': 'javascript',
+    		'py': 'python',
+    		'rb': 'ruby',
+    		'ps1': 'powershell',
+    		'psm1': 'powershell',
+    		'sh': 'bash',
+    		'bat': 'batch',
+    		'h': 'c',
+    		'tex': 'latex'
+    	};
+
+    	var STATUS_ATTR = 'data-src-status';
+    	var STATUS_LOADING = 'loading';
+    	var STATUS_LOADED = 'loaded';
+    	var STATUS_FAILED = 'failed';
+
+    	var SELECTOR = 'pre[data-src]:not([' + STATUS_ATTR + '="' + STATUS_LOADED + '"])'
+    		+ ':not([' + STATUS_ATTR + '="' + STATUS_LOADING + '"])';
+
+    	/**
+    	 * Loads the given file.
+    	 *
+    	 * @param {string} src The URL or path of the source file to load.
+    	 * @param {(result: string) => void} success
+    	 * @param {(reason: string) => void} error
+    	 */
+    	function loadFile(src, success, error) {
+    		var xhr = new XMLHttpRequest();
+    		xhr.open('GET', src, true);
+    		xhr.onreadystatechange = function () {
+    			if (xhr.readyState == 4) {
+    				if (xhr.status < 400 && xhr.responseText) {
+    					success(xhr.responseText);
+    				} else {
+    					if (xhr.status >= 400) {
+    						error(FAILURE_MESSAGE(xhr.status, xhr.statusText));
+    					} else {
+    						error(FAILURE_EMPTY_MESSAGE);
+    					}
+    				}
+    			}
+    		};
+    		xhr.send(null);
+    	}
+
+    	/**
+    	 * Parses the given range.
+    	 *
+    	 * This returns a range with inclusive ends.
+    	 *
+    	 * @param {string | null | undefined} range
+    	 * @returns {[number, number | undefined] | undefined}
+    	 */
+    	function parseRange(range) {
+    		var m = /^\s*(\d+)\s*(?:(,)\s*(?:(\d+)\s*)?)?$/.exec(range || '');
+    		if (m) {
+    			var start = Number(m[1]);
+    			var comma = m[2];
+    			var end = m[3];
+
+    			if (!comma) {
+    				return [start, start];
+    			}
+    			if (!end) {
+    				return [start, undefined];
+    			}
+    			return [start, Number(end)];
+    		}
+    		return undefined;
+    	}
+
+    	Prism.hooks.add('before-highlightall', function (env) {
+    		env.selector += ', ' + SELECTOR;
+    	});
+
+    	Prism.hooks.add('before-sanity-check', function (env) {
+    		var pre = /** @type {HTMLPreElement} */ (env.element);
+    		if (pre.matches(SELECTOR)) {
+    			env.code = ''; // fast-path the whole thing and go to complete
+
+    			pre.setAttribute(STATUS_ATTR, STATUS_LOADING); // mark as loading
+
+    			// add code element with loading message
+    			var code = pre.appendChild(document.createElement('CODE'));
+    			code.textContent = LOADING_MESSAGE;
+
+    			var src = pre.getAttribute('data-src');
+
+    			var language = env.language;
+    			if (language === 'none') {
+    				// the language might be 'none' because there is no language set;
+    				// in this case, we want to use the extension as the language
+    				var extension = (/\.(\w+)$/.exec(src) || [, 'none'])[1];
+    				language = EXTENSIONS[extension] || extension;
+    			}
+
+    			// set language classes
+    			Prism.util.setLanguage(code, language);
+    			Prism.util.setLanguage(pre, language);
+
+    			// preload the language
+    			var autoloader = Prism.plugins.autoloader;
+    			if (autoloader) {
+    				autoloader.loadLanguages(language);
+    			}
+
+    			// load file
+    			loadFile(
+    				src,
+    				function (text) {
+    					// mark as loaded
+    					pre.setAttribute(STATUS_ATTR, STATUS_LOADED);
+
+    					// handle data-range
+    					var range = parseRange(pre.getAttribute('data-range'));
+    					if (range) {
+    						var lines = text.split(/\r\n?|\n/g);
+
+    						// the range is one-based and inclusive on both ends
+    						var start = range[0];
+    						var end = range[1] == null ? lines.length : range[1];
+
+    						if (start < 0) { start += lines.length; }
+    						start = Math.max(0, Math.min(start - 1, lines.length));
+    						if (end < 0) { end += lines.length; }
+    						end = Math.max(0, Math.min(end, lines.length));
+
+    						text = lines.slice(start, end).join('\n');
+
+    						// add data-start for line numbers
+    						if (!pre.hasAttribute('data-start')) {
+    							pre.setAttribute('data-start', String(start + 1));
+    						}
+    					}
+
+    					// highlight code
+    					code.textContent = text;
+    					Prism.highlightElement(code);
+    				},
+    				function (error) {
+    					// mark as failed
+    					pre.setAttribute(STATUS_ATTR, STATUS_FAILED);
+
+    					code.textContent = error;
+    				}
+    			);
+    		}
+    	});
+
+    	Prism.plugins.fileHighlight = {
+    		/**
+    		 * Executes the File Highlight plugin for all matching `pre` elements under the given container.
+    		 *
+    		 * Note: Elements which are already loaded or currently loading will not be touched by this method.
+    		 *
+    		 * @param {ParentNode} [container=document]
+    		 */
+    		highlight: function highlight(container) {
+    			var elements = (container || document).querySelectorAll(SELECTOR);
+
+    			for (var i = 0, element; (element = elements[i++]);) {
+    				Prism.highlightElement(element);
+    			}
+    		}
+    	};
+
+    	var logged = false;
+    	/** @deprecated Use `Prism.plugins.fileHighlight.highlight` instead. */
+    	Prism.fileHighlight = function () {
+    		if (!logged) {
+    			console.warn('Prism.fileHighlight is deprecated. Use `Prism.plugins.fileHighlight.highlight` instead.');
+    			logged = true;
+    		}
+    		Prism.plugins.fileHighlight.highlight.apply(this, arguments);
+    	};
+
+    }());
+    });
+
+    (function () {
+
+    	if (typeof Prism === 'undefined' || typeof document === 'undefined') {
+    		return;
+    	}
+
+    	/**
+    	 * Plugin name which is used as a class name for <pre> which is activating the plugin
+    	 *
+    	 * @type {string}
+    	 */
+    	var PLUGIN_NAME = 'line-numbers';
+
+    	/**
+    	 * Regular expression used for determining line breaks
+    	 *
+    	 * @type {RegExp}
+    	 */
+    	var NEW_LINE_EXP = /\n(?!$)/g;
+
+
+    	/**
+    	 * Global exports
+    	 */
+    	var config = Prism.plugins.lineNumbers = {
+    		/**
+    		 * Get node for provided line number
+    		 *
+    		 * @param {Element} element pre element
+    		 * @param {number} number line number
+    		 * @returns {Element|undefined}
+    		 */
+    		getLine: function (element, number) {
+    			if (element.tagName !== 'PRE' || !element.classList.contains(PLUGIN_NAME)) {
+    				return;
+    			}
+
+    			var lineNumberRows = element.querySelector('.line-numbers-rows');
+    			if (!lineNumberRows) {
+    				return;
+    			}
+    			var lineNumberStart = parseInt(element.getAttribute('data-start'), 10) || 1;
+    			var lineNumberEnd = lineNumberStart + (lineNumberRows.children.length - 1);
+
+    			if (number < lineNumberStart) {
+    				number = lineNumberStart;
+    			}
+    			if (number > lineNumberEnd) {
+    				number = lineNumberEnd;
+    			}
+
+    			var lineIndex = number - lineNumberStart;
+
+    			return lineNumberRows.children[lineIndex];
+    		},
+
+    		/**
+    		 * Resizes the line numbers of the given element.
+    		 *
+    		 * This function will not add line numbers. It will only resize existing ones.
+    		 *
+    		 * @param {HTMLElement} element A `<pre>` element with line numbers.
+    		 * @returns {void}
+    		 */
+    		resize: function (element) {
+    			resizeElements([element]);
+    		},
+
+    		/**
+    		 * Whether the plugin can assume that the units font sizes and margins are not depended on the size of
+    		 * the current viewport.
+    		 *
+    		 * Setting this to `true` will allow the plugin to do certain optimizations for better performance.
+    		 *
+    		 * Set this to `false` if you use any of the following CSS units: `vh`, `vw`, `vmin`, `vmax`.
+    		 *
+    		 * @type {boolean}
+    		 */
+    		assumeViewportIndependence: true
+    	};
+
+    	/**
+    	 * Resizes the given elements.
+    	 *
+    	 * @param {HTMLElement[]} elements
+    	 */
+    	function resizeElements(elements) {
+    		elements = elements.filter(function (e) {
+    			var codeStyles = getStyles(e);
+    			var whiteSpace = codeStyles['white-space'];
+    			return whiteSpace === 'pre-wrap' || whiteSpace === 'pre-line';
+    		});
+
+    		if (elements.length == 0) {
+    			return;
+    		}
+
+    		var infos = elements.map(function (element) {
+    			var codeElement = element.querySelector('code');
+    			var lineNumbersWrapper = element.querySelector('.line-numbers-rows');
+    			if (!codeElement || !lineNumbersWrapper) {
+    				return undefined;
+    			}
+
+    			/** @type {HTMLElement} */
+    			var lineNumberSizer = element.querySelector('.line-numbers-sizer');
+    			var codeLines = codeElement.textContent.split(NEW_LINE_EXP);
+
+    			if (!lineNumberSizer) {
+    				lineNumberSizer = document.createElement('span');
+    				lineNumberSizer.className = 'line-numbers-sizer';
+
+    				codeElement.appendChild(lineNumberSizer);
+    			}
+
+    			lineNumberSizer.innerHTML = '0';
+    			lineNumberSizer.style.display = 'block';
+
+    			var oneLinerHeight = lineNumberSizer.getBoundingClientRect().height;
+    			lineNumberSizer.innerHTML = '';
+
+    			return {
+    				element: element,
+    				lines: codeLines,
+    				lineHeights: [],
+    				oneLinerHeight: oneLinerHeight,
+    				sizer: lineNumberSizer,
+    			};
+    		}).filter(Boolean);
+
+    		infos.forEach(function (info) {
+    			var lineNumberSizer = info.sizer;
+    			var lines = info.lines;
+    			var lineHeights = info.lineHeights;
+    			var oneLinerHeight = info.oneLinerHeight;
+
+    			lineHeights[lines.length - 1] = undefined;
+    			lines.forEach(function (line, index) {
+    				if (line && line.length > 1) {
+    					var e = lineNumberSizer.appendChild(document.createElement('span'));
+    					e.style.display = 'block';
+    					e.textContent = line;
+    				} else {
+    					lineHeights[index] = oneLinerHeight;
+    				}
+    			});
+    		});
+
+    		infos.forEach(function (info) {
+    			var lineNumberSizer = info.sizer;
+    			var lineHeights = info.lineHeights;
+
+    			var childIndex = 0;
+    			for (var i = 0; i < lineHeights.length; i++) {
+    				if (lineHeights[i] === undefined) {
+    					lineHeights[i] = lineNumberSizer.children[childIndex++].getBoundingClientRect().height;
+    				}
+    			}
+    		});
+
+    		infos.forEach(function (info) {
+    			var lineNumberSizer = info.sizer;
+    			var wrapper = info.element.querySelector('.line-numbers-rows');
+
+    			lineNumberSizer.style.display = 'none';
+    			lineNumberSizer.innerHTML = '';
+
+    			info.lineHeights.forEach(function (height, lineNumber) {
+    				wrapper.children[lineNumber].style.height = height + 'px';
+    			});
+    		});
+    	}
+
+    	/**
+    	 * Returns style declarations for the element
+    	 *
+    	 * @param {Element} element
+    	 */
+    	function getStyles(element) {
+    		if (!element) {
+    			return null;
+    		}
+
+    		return window.getComputedStyle ? getComputedStyle(element) : (element.currentStyle || null);
+    	}
+
+    	var lastWidth = undefined;
+    	window.addEventListener('resize', function () {
+    		if (config.assumeViewportIndependence && lastWidth === window.innerWidth) {
+    			return;
+    		}
+    		lastWidth = window.innerWidth;
+
+    		resizeElements(Array.prototype.slice.call(document.querySelectorAll('pre.' + PLUGIN_NAME)));
+    	});
+
+    	Prism.hooks.add('complete', function (env) {
+    		if (!env.code) {
+    			return;
+    		}
+
+    		var code = /** @type {Element} */ (env.element);
+    		var pre = /** @type {HTMLElement} */ (code.parentNode);
+
+    		// works only for <code> wrapped inside <pre> (not inline)
+    		if (!pre || !/pre/i.test(pre.nodeName)) {
+    			return;
+    		}
+
+    		// Abort if line numbers already exists
+    		if (code.querySelector('.line-numbers-rows')) {
+    			return;
+    		}
+
+    		// only add line numbers if <code> or one of its ancestors has the `line-numbers` class
+    		if (!Prism.util.isActive(code, PLUGIN_NAME)) {
+    			return;
+    		}
+
+    		// Remove the class 'line-numbers' from the <code>
+    		code.classList.remove(PLUGIN_NAME);
+    		// Add the class 'line-numbers' to the <pre>
+    		pre.classList.add(PLUGIN_NAME);
+
+    		var match = env.code.match(NEW_LINE_EXP);
+    		var linesNum = match ? match.length + 1 : 1;
+    		var lineNumbersWrapper;
+
+    		var lines = new Array(linesNum + 1).join('<span></span>');
+
+    		lineNumbersWrapper = document.createElement('span');
+    		lineNumbersWrapper.setAttribute('aria-hidden', 'true');
+    		lineNumbersWrapper.className = 'line-numbers-rows';
+    		lineNumbersWrapper.innerHTML = lines;
+
+    		if (pre.hasAttribute('data-start')) {
+    			pre.style.counterReset = 'linenumber ' + (parseInt(pre.getAttribute('data-start'), 10) - 1);
+    		}
+
+    		env.element.appendChild(lineNumbersWrapper);
+
+    		resizeElements([pre]);
+
+    		Prism.hooks.run('line-numbers', env);
+    	});
+
+    	Prism.hooks.add('line-numbers', function (env) {
+    		env.plugins = env.plugins || {};
+    		env.plugins.lineNumbers = true;
+    	});
+
+    }());
+
+    createCommonjsModule(function (module) {
+    (function () {
+
+    	if (typeof Prism === 'undefined') {
+    		return;
+    	}
+
+    	var assign = Object.assign || function (obj1, obj2) {
+    		for (var name in obj2) {
+    			if (obj2.hasOwnProperty(name)) {
+    				obj1[name] = obj2[name];
+    			}
+    		}
+    		return obj1;
+    	};
+
+    	function NormalizeWhitespace(defaults) {
+    		this.defaults = assign({}, defaults);
+    	}
+
+    	function toCamelCase(value) {
+    		return value.replace(/-(\w)/g, function (match, firstChar) {
+    			return firstChar.toUpperCase();
+    		});
+    	}
+
+    	function tabLen(str) {
+    		var res = 0;
+    		for (var i = 0; i < str.length; ++i) {
+    			if (str.charCodeAt(i) == '\t'.charCodeAt(0)) {
+    				res += 3;
+    			}
+    		}
+    		return str.length + res;
+    	}
+
+    	NormalizeWhitespace.prototype = {
+    		setDefaults: function (defaults) {
+    			this.defaults = assign(this.defaults, defaults);
+    		},
+    		normalize: function (input, settings) {
+    			settings = assign(this.defaults, settings);
+
+    			for (var name in settings) {
+    				var methodName = toCamelCase(name);
+    				if (name !== 'normalize' && methodName !== 'setDefaults' &&
+    					settings[name] && this[methodName]) {
+    					input = this[methodName].call(this, input, settings[name]);
+    				}
+    			}
+
+    			return input;
+    		},
+
+    		/*
+    		 * Normalization methods
+    		 */
+    		leftTrim: function (input) {
+    			return input.replace(/^\s+/, '');
+    		},
+    		rightTrim: function (input) {
+    			return input.replace(/\s+$/, '');
+    		},
+    		tabsToSpaces: function (input, spaces) {
+    			spaces = spaces|0 || 4;
+    			return input.replace(/\t/g, new Array(++spaces).join(' '));
+    		},
+    		spacesToTabs: function (input, spaces) {
+    			spaces = spaces|0 || 4;
+    			return input.replace(RegExp(' {' + spaces + '}', 'g'), '\t');
+    		},
+    		removeTrailing: function (input) {
+    			return input.replace(/\s*?$/gm, '');
+    		},
+    		// Support for deprecated plugin remove-initial-line-feed
+    		removeInitialLineFeed: function (input) {
+    			return input.replace(/^(?:\r?\n|\r)/, '');
+    		},
+    		removeIndent: function (input) {
+    			var indents = input.match(/^[^\S\n\r]*(?=\S)/gm);
+
+    			if (!indents || !indents[0].length) {
+    				return input;
+    			}
+
+    			indents.sort(function (a, b) { return a.length - b.length; });
+
+    			if (!indents[0].length) {
+    				return input;
+    			}
+
+    			return input.replace(RegExp('^' + indents[0], 'gm'), '');
+    		},
+    		indent: function (input, tabs) {
+    			return input.replace(/^[^\S\n\r]*(?=\S)/gm, new Array(++tabs).join('\t') + '$&');
+    		},
+    		breakLines: function (input, characters) {
+    			characters = (characters === true) ? 80 : characters|0 || 80;
+
+    			var lines = input.split('\n');
+    			for (var i = 0; i < lines.length; ++i) {
+    				if (tabLen(lines[i]) <= characters) {
+    					continue;
+    				}
+
+    				var line = lines[i].split(/(\s+)/g);
+    				var len = 0;
+
+    				for (var j = 0; j < line.length; ++j) {
+    					var tl = tabLen(line[j]);
+    					len += tl;
+    					if (len > characters) {
+    						line[j] = '\n' + line[j];
+    						len = tl;
+    					}
+    				}
+    				lines[i] = line.join('');
+    			}
+    			return lines.join('\n');
+    		}
+    	};
+
+    	// Support node modules
+    	if (module.exports) {
+    		module.exports = NormalizeWhitespace;
+    	}
+
+    	Prism.plugins.NormalizeWhitespace = new NormalizeWhitespace({
+    		'remove-trailing': true,
+    		'remove-indent': true,
+    		'left-trim': true,
+    		'right-trim': true,
+    		/*'break-lines': 80,
+    		'indent': 2,
+    		'remove-initial-line-feed': false,
+    		'tabs-to-spaces': 4,
+    		'spaces-to-tabs': 4*/
+    	});
+
+    	Prism.hooks.add('before-sanity-check', function (env) {
+    		var Normalizer = Prism.plugins.NormalizeWhitespace;
+
+    		// Check settings
+    		if (env.settings && env.settings['whitespace-normalization'] === false) {
+    			return;
+    		}
+
+    		// Check classes
+    		if (!Prism.util.isActive(env.element, 'whitespace-normalization', true)) {
+    			return;
+    		}
+
+    		// Simple mode if there is no env.element
+    		if ((!env.element || !env.element.parentNode) && env.code) {
+    			env.code = Normalizer.normalize(env.code, env.settings);
+    			return;
+    		}
+
+    		// Normal mode
+    		var pre = env.element.parentNode;
+    		if (!env.code || !pre || pre.nodeName.toLowerCase() !== 'pre') {
+    			return;
+    		}
+
+    		var children = pre.childNodes;
+    		var before = '';
+    		var after = '';
+    		var codeFound = false;
+
+    		// Move surrounding whitespace from the <pre> tag into the <code> tag
+    		for (var i = 0; i < children.length; ++i) {
+    			var node = children[i];
+
+    			if (node == env.element) {
+    				codeFound = true;
+    			} else if (node.nodeName === '#text') {
+    				if (codeFound) {
+    					after += node.nodeValue;
+    				} else {
+    					before += node.nodeValue;
+    				}
+
+    				pre.removeChild(node);
+    				--i;
+    			}
+    		}
+
+    		if (!env.element.children.length || !Prism.plugins.KeepMarkup) {
+    			env.code = before + env.code + after;
+    			env.code = Normalizer.normalize(env.code, env.settings);
+    		} else {
+    			// Preserve markup for keep-markup plugin
+    			var html = before + env.element.innerHTML + after;
+    			env.element.innerHTML = Normalizer.normalize(html, env.settings);
+    			env.code = env.element.textContent;
+    		}
+    	});
+
+    }());
+    });
+
+    /* node_modules/svelte-prismjs/src/Prism.svelte generated by Svelte v3.44.3 */
+    const file$d = "node_modules/svelte-prismjs/src/Prism.svelte";
+
+    function create_fragment$d(ctx) {
+    	let code0;
+    	let t;
+    	let pre;
+    	let code1;
+    	let code1_class_value;
+    	let pre_class_value;
+    	let current;
+    	const default_slot_template = /*#slots*/ ctx[12].default;
+    	const default_slot = create_slot(default_slot_template, ctx, /*$$scope*/ ctx[11], null);
+
+    	let pre_levels = [
+    		{
+    			class: pre_class_value = "" + (/*prismClasses*/ ctx[5] + " " + /*classes*/ ctx[1])
+    		},
+    		/*$$restProps*/ ctx[6]
+    	];
+
+    	let pre_data = {};
+
+    	for (let i = 0; i < pre_levels.length; i += 1) {
+    		pre_data = assign(pre_data, pre_levels[i]);
+    	}
+
+    	const block = {
+    		c: function create() {
+    			code0 = element("code");
+    			if (default_slot) default_slot.c();
+    			t = space();
+    			pre = element("pre");
+    			code1 = element("code");
+    			set_style(code0, "display", "none");
+    			add_location(code0, file$d, 81, 0, 2395);
+    			attr_dev(code1, "class", code1_class_value = "language-" + /*language*/ ctx[0]);
+    			add_location(code1, file$d, 85, 2, 2543);
+    			set_attributes(pre, pre_data);
+    			add_location(pre, file$d, 84, 0, 2467);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, code0, anchor);
+
+    			if (default_slot) {
+    				default_slot.m(code0, null);
+    			}
+
+    			/*code0_binding*/ ctx[13](code0);
+    			insert_dev(target, t, anchor);
+    			insert_dev(target, pre, anchor);
+    			append_dev(pre, code1);
+    			code1.innerHTML = /*formattedCode*/ ctx[4];
+    			/*pre_binding*/ ctx[14](pre);
     			current = true;
     		},
     		p: function update(ctx, [dirty]) {
-    			const navbaritem0_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem0_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem0.$set(navbaritem0_changes);
-    			const navbaritem1_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem1_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem1.$set(navbaritem1_changes);
-    			const navbaritem2_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem2_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem2.$set(navbaritem2_changes);
-    			const navbaritem3_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem3_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem3.$set(navbaritem3_changes);
-    			const navbaritem4_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem4_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem4.$set(navbaritem4_changes);
-    			const navbaritem5_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem5_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem5.$set(navbaritem5_changes);
-    			const navbaritem6_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem6_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem6.$set(navbaritem6_changes);
-    			const navbaritem7_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem7_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem7.$set(navbaritem7_changes);
-    			const navbaritem8_changes = {};
-    			if (dirty & /*currentRoute*/ 1) navbaritem8_changes.currentRoute = /*currentRoute*/ ctx[0];
-    			navbaritem8.$set(navbaritem8_changes);
-    			if ((!current || dirty & /*currentRoute*/ 1) && t11_value !== (t11_value = /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].text + "")) set_data_dev(t11, t11_value);
-    			if ((!current || dirty & /*currentRoute*/ 1) && t14_value !== (t14_value = /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].file + "")) set_data_dev(t14, t14_value);
+    			if (default_slot) {
+    				if (default_slot.p && (!current || dirty & /*$$scope*/ 2048)) {
+    					update_slot_base(
+    						default_slot,
+    						default_slot_template,
+    						ctx,
+    						/*$$scope*/ ctx[11],
+    						!current
+    						? get_all_dirty_from_scope(/*$$scope*/ ctx[11])
+    						: get_slot_changes(default_slot_template, /*$$scope*/ ctx[11], dirty, null),
+    						null
+    					);
+    				}
+    			}
 
-    			if (!current || dirty & /*currentRoute*/ 1 && a_href_value !== (a_href_value = github + /*modules*/ ctx[1][/*currentRoute*/ ctx[0].name].file)) {
-    				attr_dev(a, "href", a_href_value);
+    			if (!current || dirty & /*formattedCode*/ 16) code1.innerHTML = /*formattedCode*/ ctx[4];
+    			if (!current || dirty & /*language*/ 1 && code1_class_value !== (code1_class_value = "language-" + /*language*/ ctx[0])) {
+    				attr_dev(code1, "class", code1_class_value);
+    			}
+
+    			set_attributes(pre, pre_data = get_spread_update(pre_levels, [
+    				(!current || dirty & /*prismClasses, classes*/ 34 && pre_class_value !== (pre_class_value = "" + (/*prismClasses*/ ctx[5] + " " + /*classes*/ ctx[1]))) && { class: pre_class_value },
+    				dirty & /*$$restProps*/ 64 && /*$$restProps*/ ctx[6]
+    			]));
+    		},
+    		i: function intro(local) {
+    			if (current) return;
+    			transition_in(default_slot, local);
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			transition_out(default_slot, local);
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(code0);
+    			if (default_slot) default_slot.d(detaching);
+    			/*code0_binding*/ ctx[13](null);
+    			if (detaching) detach_dev(t);
+    			if (detaching) detach_dev(pre);
+    			/*pre_binding*/ ctx[14](null);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$d.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$d($$self, $$props, $$invalidate) {
+    	let prismClasses;
+
+    	const omit_props_names = [
+    		"code","language","showLineNumbers","normalizeWhiteSpace","normalizeWhiteSpaceConfig","classes"
+    	];
+
+    	let $$restProps = compute_rest_props($$props, omit_props_names);
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('Prism', slots, ['default']);
+    	let { code = "" } = $$props;
+    	let { language = "javascript" } = $$props;
+    	let { showLineNumbers = false } = $$props;
+    	let { normalizeWhiteSpace = true } = $$props;
+
+    	let { normalizeWhiteSpaceConfig = {
+    		"remove-trailing": true,
+    		"remove-indent": true,
+    		"left-trim": true,
+    		"right-trim": true
+    	} } = $$props; /*'break-lines': 80,
+    	'indent': 2,
+    	'remove-initial-line-feed': false,
+    	'tabs-to-spaces': 4,
+    	'spaces-to-tabs': 4*/
+
+    	let { classes = "" } = $$props;
+
+    	// This is the fake coding element
+    	let fakeCodeEl;
+
+    	// This is pre Element
+    	let preEl;
+
+    	// This stored the formatted HTML to display
+    	let formattedCode = "";
+
+    	onMount(() => {
+    		if (normalizeWhiteSpace) {
+    			Prism.plugins.NormalizeWhitespace.setDefaults(normalizeWhiteSpaceConfig);
+    		}
+    	});
+
+    	afterUpdate(async node => {
+    		// code variable if they are using a prop
+    		// Have to use innerText because innerHTML will create weird escape characaters
+    		if (fakeCodeEl && fakeCodeEl.innerText !== "") {
+    			$$invalidate(7, code = fakeCodeEl.innerText);
+    		}
+
+    		// We need to wait till everything been rendered before we can
+    		// call highlightAll and load all the plugins
+    		await tick();
+
+    		// This will make sure all the plugins are loaded
+    		// Prism.highlight will not do that
+    		Prism.highlightAllUnder(preEl);
+    	});
+
+    	function code0_binding($$value) {
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			fakeCodeEl = $$value;
+    			$$invalidate(2, fakeCodeEl);
+    		});
+    	}
+
+    	function pre_binding($$value) {
+    		binding_callbacks[$$value ? 'unshift' : 'push'](() => {
+    			preEl = $$value;
+    			$$invalidate(3, preEl);
+    		});
+    	}
+
+    	$$self.$$set = $$new_props => {
+    		$$props = assign(assign({}, $$props), exclude_internal_props($$new_props));
+    		$$invalidate(6, $$restProps = compute_rest_props($$props, omit_props_names));
+    		if ('code' in $$new_props) $$invalidate(7, code = $$new_props.code);
+    		if ('language' in $$new_props) $$invalidate(0, language = $$new_props.language);
+    		if ('showLineNumbers' in $$new_props) $$invalidate(8, showLineNumbers = $$new_props.showLineNumbers);
+    		if ('normalizeWhiteSpace' in $$new_props) $$invalidate(9, normalizeWhiteSpace = $$new_props.normalizeWhiteSpace);
+    		if ('normalizeWhiteSpaceConfig' in $$new_props) $$invalidate(10, normalizeWhiteSpaceConfig = $$new_props.normalizeWhiteSpaceConfig);
+    		if ('classes' in $$new_props) $$invalidate(1, classes = $$new_props.classes);
+    		if ('$$scope' in $$new_props) $$invalidate(11, $$scope = $$new_props.$$scope);
+    	};
+
+    	$$self.$capture_state = () => ({
+    		afterUpdate,
+    		tick,
+    		onMount,
+    		code,
+    		language,
+    		showLineNumbers,
+    		normalizeWhiteSpace,
+    		normalizeWhiteSpaceConfig,
+    		classes,
+    		fakeCodeEl,
+    		preEl,
+    		formattedCode,
+    		prismClasses
+    	});
+
+    	$$self.$inject_state = $$new_props => {
+    		if ('code' in $$props) $$invalidate(7, code = $$new_props.code);
+    		if ('language' in $$props) $$invalidate(0, language = $$new_props.language);
+    		if ('showLineNumbers' in $$props) $$invalidate(8, showLineNumbers = $$new_props.showLineNumbers);
+    		if ('normalizeWhiteSpace' in $$props) $$invalidate(9, normalizeWhiteSpace = $$new_props.normalizeWhiteSpace);
+    		if ('normalizeWhiteSpaceConfig' in $$props) $$invalidate(10, normalizeWhiteSpaceConfig = $$new_props.normalizeWhiteSpaceConfig);
+    		if ('classes' in $$props) $$invalidate(1, classes = $$new_props.classes);
+    		if ('fakeCodeEl' in $$props) $$invalidate(2, fakeCodeEl = $$new_props.fakeCodeEl);
+    		if ('preEl' in $$props) $$invalidate(3, preEl = $$new_props.preEl);
+    		if ('formattedCode' in $$props) $$invalidate(4, formattedCode = $$new_props.formattedCode);
+    		if ('prismClasses' in $$props) $$invalidate(5, prismClasses = $$new_props.prismClasses);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	$$self.$$.update = () => {
+    		if ($$self.$$.dirty & /*language, showLineNumbers, normalizeWhiteSpace*/ 769) {
+    			// creates the prism classes
+    			$$invalidate(5, prismClasses = `language-${language} ${showLineNumbers ? "line-numbers" : ""} ${normalizeWhiteSpace === true
+			? ""
+			: "no-whitespace-normalization"}`);
+    		}
+
+    		if ($$self.$$.dirty & /*code, language*/ 129) {
+    			// Only run if Prism is defined and we code
+    			if (typeof Prism !== "undefined" && code) {
+    				$$invalidate(4, formattedCode = Prism.highlight(code, Prism.languages[language], language));
+    			}
+    		}
+    	};
+
+    	return [
+    		language,
+    		classes,
+    		fakeCodeEl,
+    		preEl,
+    		formattedCode,
+    		prismClasses,
+    		$$restProps,
+    		code,
+    		showLineNumbers,
+    		normalizeWhiteSpace,
+    		normalizeWhiteSpaceConfig,
+    		$$scope,
+    		slots,
+    		code0_binding,
+    		pre_binding
+    	];
+    }
+
+    class Prism_1 extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+
+    		init(this, options, instance$d, create_fragment$d, safe_not_equal, {
+    			code: 7,
+    			language: 0,
+    			showLineNumbers: 8,
+    			normalizeWhiteSpace: 9,
+    			normalizeWhiteSpaceConfig: 10,
+    			classes: 1
+    		});
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "Prism_1",
+    			options,
+    			id: create_fragment$d.name
+    		});
+    	}
+
+    	get code() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set code(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	get language() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set language(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	get showLineNumbers() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set showLineNumbers(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	get normalizeWhiteSpace() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set normalizeWhiteSpace(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	get normalizeWhiteSpaceConfig() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set normalizeWhiteSpaceConfig(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	get classes() {
+    		throw new Error("<Prism>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set classes(value) {
+    		throw new Error("<Prism>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+    }
+
+    /* src/components/CodeView.svelte generated by Svelte v3.44.3 */
+    const file$c = "src/components/CodeView.svelte";
+
+    // (11:0) {#if $showCode}
+    function create_if_block$1(ctx) {
+    	let div;
+    	let prism;
+    	let current;
+
+    	prism = new Prism_1({
+    			props: {
+    				language: "svelte",
+    				code: /*code*/ ctx[0]
+    			},
+    			$$inline: true
+    		});
+
+    	const block = {
+    		c: function create() {
+    			div = element("div");
+    			create_component(prism.$$.fragment);
+    			attr_dev(div, "class", "codeview svelte-1ql74m6");
+    			add_location(div, file$c, 11, 1, 190);
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div, anchor);
+    			mount_component(prism, div, null);
+    			current = true;
+    		},
+    		p: function update(ctx, dirty) {
+    			const prism_changes = {};
+    			if (dirty & /*code*/ 1) prism_changes.code = /*code*/ ctx[0];
+    			prism.$set(prism_changes);
+    		},
+    		i: function intro(local) {
+    			if (current) return;
+    			transition_in(prism.$$.fragment, local);
+    			current = true;
+    		},
+    		o: function outro(local) {
+    			transition_out(prism.$$.fragment, local);
+    			current = false;
+    		},
+    		d: function destroy(detaching) {
+    			if (detaching) detach_dev(div);
+    			destroy_component(prism);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_if_block$1.name,
+    		type: "if",
+    		source: "(11:0) {#if $showCode}",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function create_fragment$c(ctx) {
+    	let if_block_anchor;
+    	let current;
+    	let if_block = /*$showCode*/ ctx[1] && create_if_block$1(ctx);
+
+    	const block = {
+    		c: function create() {
+    			if (if_block) if_block.c();
+    			if_block_anchor = empty();
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			if (if_block) if_block.m(target, anchor);
+    			insert_dev(target, if_block_anchor, anchor);
+    			current = true;
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (/*$showCode*/ ctx[1]) {
+    				if (if_block) {
+    					if_block.p(ctx, dirty);
+
+    					if (dirty & /*$showCode*/ 2) {
+    						transition_in(if_block, 1);
+    					}
+    				} else {
+    					if_block = create_if_block$1(ctx);
+    					if_block.c();
+    					transition_in(if_block, 1);
+    					if_block.m(if_block_anchor.parentNode, if_block_anchor);
+    				}
+    			} else if (if_block) {
+    				group_outros();
+
+    				transition_out(if_block, 1, 1, () => {
+    					if_block = null;
+    				});
+
+    				check_outros();
     			}
     		},
     		i: function intro(local) {
     			if (current) return;
-    			transition_in(navbaritem0.$$.fragment, local);
-    			transition_in(navbaritem1.$$.fragment, local);
-    			transition_in(navbaritem2.$$.fragment, local);
-    			transition_in(navbaritem3.$$.fragment, local);
-    			transition_in(navbaritem4.$$.fragment, local);
-    			transition_in(navbaritem5.$$.fragment, local);
-    			transition_in(navbaritem6.$$.fragment, local);
-    			transition_in(navbaritem7.$$.fragment, local);
-    			transition_in(navbaritem8.$$.fragment, local);
+    			transition_in(if_block);
     			current = true;
     		},
     		o: function outro(local) {
-    			transition_out(navbaritem0.$$.fragment, local);
-    			transition_out(navbaritem1.$$.fragment, local);
-    			transition_out(navbaritem2.$$.fragment, local);
-    			transition_out(navbaritem3.$$.fragment, local);
-    			transition_out(navbaritem4.$$.fragment, local);
-    			transition_out(navbaritem5.$$.fragment, local);
-    			transition_out(navbaritem6.$$.fragment, local);
-    			transition_out(navbaritem7.$$.fragment, local);
-    			transition_out(navbaritem8.$$.fragment, local);
+    			transition_out(if_block);
     			current = false;
     		},
     		d: function destroy(detaching) {
+    			if (if_block) if_block.d(detaching);
+    			if (detaching) detach_dev(if_block_anchor);
+    		}
+    	};
+
+    	dispatch_dev("SvelteRegisterBlock", {
+    		block,
+    		id: create_fragment$c.name,
+    		type: "component",
+    		source: "",
+    		ctx
+    	});
+
+    	return block;
+    }
+
+    function instance$c($$self, $$props, $$invalidate) {
+    	let code;
+    	let $modules;
+    	let $showCode;
+    	validate_store(modules, 'modules');
+    	component_subscribe($$self, modules, $$value => $$invalidate(3, $modules = $$value));
+    	validate_store(showCode, 'showCode');
+    	component_subscribe($$self, showCode, $$value => $$invalidate(1, $showCode = $$value));
+    	let { $$slots: slots = {}, $$scope } = $$props;
+    	validate_slots('CodeView', slots, []);
+    	let { currentRoute } = $$props;
+    	const writable_props = ['currentRoute'];
+
+    	Object.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<CodeView> was created with unknown prop '${key}'`);
+    	});
+
+    	$$self.$$set = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(2, currentRoute = $$props.currentRoute);
+    	};
+
+    	$$self.$capture_state = () => ({
+    		Prism: Prism_1,
+    		showCode,
+    		modules,
+    		currentRoute,
+    		code,
+    		$modules,
+    		$showCode
+    	});
+
+    	$$self.$inject_state = $$props => {
+    		if ('currentRoute' in $$props) $$invalidate(2, currentRoute = $$props.currentRoute);
+    		if ('code' in $$props) $$invalidate(0, code = $$props.code);
+    	};
+
+    	if ($$props && "$$inject" in $$props) {
+    		$$self.$inject_state($$props.$$inject);
+    	}
+
+    	$$self.$$.update = () => {
+    		if ($$self.$$.dirty & /*$modules, currentRoute*/ 12) {
+    			$$invalidate(0, code = $modules[currentRoute.name].code);
+    		}
+    	};
+
+    	return [code, $showCode, currentRoute, $modules];
+    }
+
+    class CodeView extends SvelteComponentDev {
+    	constructor(options) {
+    		super(options);
+    		init(this, options, instance$c, create_fragment$c, safe_not_equal, { currentRoute: 2 });
+
+    		dispatch_dev("SvelteRegisterComponent", {
+    			component: this,
+    			tagName: "CodeView",
+    			options,
+    			id: create_fragment$c.name
+    		});
+
+    		const { ctx } = this.$$;
+    		const props = options.props || {};
+
+    		if (/*currentRoute*/ ctx[2] === undefined && !('currentRoute' in props)) {
+    			console.warn("<CodeView> was created without expected prop 'currentRoute'");
+    		}
+    	}
+
+    	get currentRoute() {
+    		throw new Error("<CodeView>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+
+    	set currentRoute(value) {
+    		throw new Error("<CodeView>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
+    	}
+    }
+
+    /* src/components/Footer.svelte generated by Svelte v3.44.3 */
+    const file$b = "src/components/Footer.svelte";
+
+    function create_fragment$b(ctx) {
+    	let div2;
+    	let div0;
+    	let a0;
+    	let t0;
+    	let t1;
+    	let span;
+    	let t2;
+    	let t3;
+    	let t4;
+    	let t5;
+    	let t6;
+    	let div1;
+    	let a1;
+    	let t7;
+
+    	const block = {
+    		c: function create() {
+    			div2 = element("div");
+    			div0 = element("div");
+    			a0 = element("a");
+    			t0 = text("Support ZingGrid with a Commercial License (more info...)");
+    			t1 = space();
+    			span = element("span");
+    			t2 = text("v");
+    			t3 = text(/*$version*/ ctx[1]);
+    			t4 = text(" Updated ");
+    			t5 = text(/*$pubDate*/ ctx[2]);
+    			t6 = space();
+    			div1 = element("div");
+    			a1 = element("a");
+    			t7 = text("Report Bug");
+    			attr_dev(a0, "href", /*$pricing*/ ctx[0]);
+    			attr_dev(a0, "target", "_blank");
+    			attr_dev(a0, "ref", "noreferrer");
+    			attr_dev(a0, "class", "svelte-142hg70");
+    			add_location(a0, file$b, 7, 2, 128);
+    			attr_dev(span, "class", "right svelte-142hg70");
+    			add_location(span, file$b, 8, 2, 244);
+    			attr_dev(div0, "class", "row1 svelte-142hg70");
+    			add_location(div0, file$b, 6, 1, 107);
+    			attr_dev(a1, "href", /*$gitIssues*/ ctx[3]);
+    			attr_dev(a1, "target", "_blank");
+    			attr_dev(a1, "ref", "noreferrer");
+    			attr_dev(a1, "class", "right svelte-142hg70");
+    			add_location(a1, file$b, 11, 2, 332);
+    			attr_dev(div1, "class", "row2 svelte-142hg70");
+    			add_location(div1, file$b, 10, 1, 311);
+    			attr_dev(div2, "class", "footer svelte-142hg70");
+    			add_location(div2, file$b, 5, 0, 85);
+    		},
+    		l: function claim(nodes) {
+    			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
+    		},
+    		m: function mount(target, anchor) {
+    			insert_dev(target, div2, anchor);
+    			append_dev(div2, div0);
+    			append_dev(div0, a0);
+    			append_dev(a0, t0);
+    			append_dev(div0, t1);
+    			append_dev(div0, span);
+    			append_dev(span, t2);
+    			append_dev(span, t3);
+    			append_dev(span, t4);
+    			append_dev(span, t5);
+    			append_dev(div2, t6);
+    			append_dev(div2, div1);
+    			append_dev(div1, a1);
+    			append_dev(a1, t7);
+    		},
+    		p: function update(ctx, [dirty]) {
+    			if (dirty & /*$pricing*/ 1) {
+    				attr_dev(a0, "href", /*$pricing*/ ctx[0]);
+    			}
+
+    			if (dirty & /*$version*/ 2) set_data_dev(t3, /*$version*/ ctx[1]);
+    			if (dirty & /*$pubDate*/ 4) set_data_dev(t5, /*$pubDate*/ ctx[2]);
+
+    			if (dirty & /*$gitIssues*/ 8) {
+    				attr_dev(a1, "href", /*$gitIssues*/ ctx[3]);
+    			}
+    		},
+    		i: noop,
+    		o: noop,
+    		d: function destroy(detaching) {
     			if (detaching) detach_dev(div2);
-    			destroy_component(navbaritem0);
-    			destroy_component(navbaritem1);
-    			destroy_component(navbaritem2);
-    			destroy_component(navbaritem3);
-    			destroy_component(navbaritem4);
-    			destroy_component(navbaritem5);
-    			destroy_component(navbaritem6);
-    			destroy_component(navbaritem7);
-    			destroy_component(navbaritem8);
     		}
     	};
 
@@ -2695,106 +6338,52 @@ var app = (function () {
     	return block;
     }
 
-    const github = 'https://github.com/zinggrid-demos/zinggrid-svelte-demo/blob/main/src/components/';
-
     function instance$b($$self, $$props, $$invalidate) {
+    	let $pricing;
+    	let $version;
+    	let $pubDate;
+    	let $gitIssues;
+    	validate_store(pricing, 'pricing');
+    	component_subscribe($$self, pricing, $$value => $$invalidate(0, $pricing = $$value));
+    	validate_store(version, 'version');
+    	component_subscribe($$self, version, $$value => $$invalidate(1, $version = $$value));
+    	validate_store(pubDate, 'pubDate');
+    	component_subscribe($$self, pubDate, $$value => $$invalidate(2, $pubDate = $$value));
+    	validate_store(gitIssues, 'gitIssues');
+    	component_subscribe($$self, gitIssues, $$value => $$invalidate(3, $gitIssues = $$value));
     	let { $$slots: slots = {}, $$scope } = $$props;
-    	validate_slots('TopHeader', slots, []);
-    	let { currentRoute } = $$props;
-
-    	const modules = {
-    		'/': {
-    			text: 'Demonstrates a simple read-only grid of static data',
-    			file: 'Simple.svelte'
-    		},
-    		'/themes': {
-    			text: 'Demonstrates a read-only grid of static data with a theme selector',
-    			file: 'Themes.svelte'
-    		},
-    		'/methods': {
-    			text: 'Demonstrates using a method call to set the data for a grid',
-    			file: 'Methods.svelte'
-    		},
-    		'/events': {
-    			text: 'Demonstrates grid events',
-    			file: 'Events.svelte'
-    		},
-    		'/fetch': {
-    			text: 'Demonstrates fetching grid data from the server',
-    			file: 'Fetch.svelte'
-    		},
-    		'/oneway': {
-    			text: 'Demonstrates data binding in one direction',
-    			file: 'OneWay.svelte'
-    		},
-    		'/twoway': {
-    			text: 'Demonstrates data binding in two directions',
-    			file: 'TwoWay.svelte'
-    		},
-    		'/conditional': {
-    			text: 'Demonstrates conditional rendering',
-    			file: 'Conditional.svelte'
-    		},
-    		'/register': {
-    			text: 'Demonstrates registering a custom rendering method (column 1)',
-    			file: 'Register.svelte'
-    		}
-    	};
-
-    	const writable_props = ['currentRoute'];
+    	validate_slots('Footer', slots, []);
+    	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<TopHeader> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<Footer> was created with unknown prop '${key}'`);
     	});
-
-    	$$self.$$set = $$props => {
-    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
-    	};
 
     	$$self.$capture_state = () => ({
-    		NavbarItem,
-    		currentRoute,
-    		github,
-    		modules
+    		pricing,
+    		version,
+    		pubDate,
+    		gitIssues,
+    		$pricing,
+    		$version,
+    		$pubDate,
+    		$gitIssues
     	});
 
-    	$$self.$inject_state = $$props => {
-    		if ('currentRoute' in $$props) $$invalidate(0, currentRoute = $$props.currentRoute);
-    	};
-
-    	if ($$props && "$$inject" in $$props) {
-    		$$self.$inject_state($$props.$$inject);
-    	}
-
-    	return [currentRoute, modules];
+    	return [$pricing, $version, $pubDate, $gitIssues];
     }
 
-    class TopHeader extends SvelteComponentDev {
+    class Footer extends SvelteComponentDev {
     	constructor(options) {
     		super(options);
-    		init(this, options, instance$b, create_fragment$b, safe_not_equal, { currentRoute: 0 });
+    		init(this, options, instance$b, create_fragment$b, safe_not_equal, {});
 
     		dispatch_dev("SvelteRegisterComponent", {
     			component: this,
-    			tagName: "TopHeader",
+    			tagName: "Footer",
     			options,
     			id: create_fragment$b.name
     		});
-
-    		const { ctx } = this.$$;
-    		const props = options.props || {};
-
-    		if (/*currentRoute*/ ctx[0] === undefined && !('currentRoute' in props)) {
-    			console.warn("<TopHeader> was created without expected prop 'currentRoute'");
-    		}
-    	}
-
-    	get currentRoute() {
-    		throw new Error("<TopHeader>: Props cannot be read directly from the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
-    	}
-
-    	set currentRoute(value) {
-    		throw new Error("<TopHeader>: Props cannot be set directly on the component instance unless compiling with 'accessors: true' or '<svelte:options accessors/>'");
     	}
     }
 
@@ -2803,13 +6392,36 @@ var app = (function () {
 
     function create_fragment$a(ctx) {
     	let div;
+    	let section0;
     	let topheader;
-    	let t;
-    	let section;
+    	let t0;
+    	let topbuttonbar;
+    	let t1;
+    	let section1;
+    	let demotitlebar;
+    	let t2;
     	let route;
+    	let t3;
+    	let section2;
+    	let codebuttonbar;
+    	let t4;
+    	let codeview;
+    	let t5;
+    	let section3;
+    	let footer;
     	let current;
 
     	topheader = new TopHeader({
+    			props: { currentRoute: /*currentRoute*/ ctx[1] },
+    			$$inline: true
+    		});
+
+    	topbuttonbar = new TopButtonBar({
+    			props: { currentRoute: /*currentRoute*/ ctx[1] },
+    			$$inline: true
+    		});
+
+    	demotitlebar = new DemoTitleBar({
     			props: { currentRoute: /*currentRoute*/ ctx[1] },
     			$$inline: true
     		});
@@ -2822,53 +6434,129 @@ var app = (function () {
     			$$inline: true
     		});
 
+    	codebuttonbar = new CodeButtonBar({
+    			props: { currentRoute: /*currentRoute*/ ctx[1] },
+    			$$inline: true
+    		});
+
+    	codeview = new CodeView({
+    			props: { currentRoute: /*currentRoute*/ ctx[1] },
+    			$$inline: true
+    		});
+
+    	footer = new Footer({
+    			props: { currentRoute: /*currentRoute*/ ctx[1] },
+    			$$inline: true
+    		});
+
     	const block = {
     		c: function create() {
     			div = element("div");
+    			section0 = element("section");
     			create_component(topheader.$$.fragment);
-    			t = space();
-    			section = element("section");
+    			t0 = space();
+    			create_component(topbuttonbar.$$.fragment);
+    			t1 = space();
+    			section1 = element("section");
+    			create_component(demotitlebar.$$.fragment);
+    			t2 = space();
     			create_component(route.$$.fragment);
-    			attr_dev(section, "class", "section");
-    			add_location(section, file$a, 10, 1, 211);
+    			t3 = space();
+    			section2 = element("section");
+    			create_component(codebuttonbar.$$.fragment);
+    			t4 = space();
+    			create_component(codeview.$$.fragment);
+    			t5 = space();
+    			section3 = element("section");
+    			create_component(footer.$$.fragment);
+    			attr_dev(section0, "class", "header");
+    			add_location(section0, file$a, 14, 1, 473);
+    			attr_dev(section1, "class", "section");
+    			add_location(section1, file$a, 18, 1, 576);
+    			add_location(section2, file$a, 22, 1, 685);
+    			attr_dev(section3, "class", "footer");
+    			add_location(section3, file$a, 26, 1, 773);
     			attr_dev(div, "class", "app");
-    			add_location(div, file$a, 8, 0, 162);
+    			add_location(div, file$a, 13, 0, 454);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
-    			mount_component(topheader, div, null);
-    			append_dev(div, t);
-    			append_dev(div, section);
-    			mount_component(route, section, null);
+    			append_dev(div, section0);
+    			mount_component(topheader, section0, null);
+    			append_dev(section0, t0);
+    			mount_component(topbuttonbar, section0, null);
+    			append_dev(div, t1);
+    			append_dev(div, section1);
+    			mount_component(demotitlebar, section1, null);
+    			append_dev(section1, t2);
+    			mount_component(route, section1, null);
+    			append_dev(div, t3);
+    			append_dev(div, section2);
+    			mount_component(codebuttonbar, section2, null);
+    			append_dev(section2, t4);
+    			mount_component(codeview, section2, null);
+    			append_dev(div, t5);
+    			append_dev(div, section3);
+    			mount_component(footer, section3, null);
     			current = true;
     		},
     		p: function update(ctx, [dirty]) {
     			const topheader_changes = {};
     			if (dirty & /*currentRoute*/ 2) topheader_changes.currentRoute = /*currentRoute*/ ctx[1];
     			topheader.$set(topheader_changes);
+    			const topbuttonbar_changes = {};
+    			if (dirty & /*currentRoute*/ 2) topbuttonbar_changes.currentRoute = /*currentRoute*/ ctx[1];
+    			topbuttonbar.$set(topbuttonbar_changes);
+    			const demotitlebar_changes = {};
+    			if (dirty & /*currentRoute*/ 2) demotitlebar_changes.currentRoute = /*currentRoute*/ ctx[1];
+    			demotitlebar.$set(demotitlebar_changes);
     			const route_changes = {};
     			if (dirty & /*currentRoute*/ 2) route_changes.currentRoute = /*currentRoute*/ ctx[1];
     			if (dirty & /*params*/ 1) route_changes.params = /*params*/ ctx[0];
     			route.$set(route_changes);
+    			const codebuttonbar_changes = {};
+    			if (dirty & /*currentRoute*/ 2) codebuttonbar_changes.currentRoute = /*currentRoute*/ ctx[1];
+    			codebuttonbar.$set(codebuttonbar_changes);
+    			const codeview_changes = {};
+    			if (dirty & /*currentRoute*/ 2) codeview_changes.currentRoute = /*currentRoute*/ ctx[1];
+    			codeview.$set(codeview_changes);
+    			const footer_changes = {};
+    			if (dirty & /*currentRoute*/ 2) footer_changes.currentRoute = /*currentRoute*/ ctx[1];
+    			footer.$set(footer_changes);
     		},
     		i: function intro(local) {
     			if (current) return;
     			transition_in(topheader.$$.fragment, local);
+    			transition_in(topbuttonbar.$$.fragment, local);
+    			transition_in(demotitlebar.$$.fragment, local);
     			transition_in(route.$$.fragment, local);
+    			transition_in(codebuttonbar.$$.fragment, local);
+    			transition_in(codeview.$$.fragment, local);
+    			transition_in(footer.$$.fragment, local);
     			current = true;
     		},
     		o: function outro(local) {
     			transition_out(topheader.$$.fragment, local);
+    			transition_out(topbuttonbar.$$.fragment, local);
+    			transition_out(demotitlebar.$$.fragment, local);
     			transition_out(route.$$.fragment, local);
+    			transition_out(codebuttonbar.$$.fragment, local);
+    			transition_out(codeview.$$.fragment, local);
+    			transition_out(footer.$$.fragment, local);
     			current = false;
     		},
     		d: function destroy(detaching) {
     			if (detaching) detach_dev(div);
     			destroy_component(topheader);
+    			destroy_component(topbuttonbar);
+    			destroy_component(demotitlebar);
     			destroy_component(route);
+    			destroy_component(codebuttonbar);
+    			destroy_component(codeview);
+    			destroy_component(footer);
     		}
     	};
 
@@ -2899,7 +6587,17 @@ var app = (function () {
     		if ('currentRoute' in $$props) $$invalidate(1, currentRoute = $$props.currentRoute);
     	};
 
-    	$$self.$capture_state = () => ({ Route, TopHeader, params, currentRoute });
+    	$$self.$capture_state = () => ({
+    		Route,
+    		TopHeader,
+    		TopButtonBar,
+    		DemoTitleBar,
+    		CodeButtonBar,
+    		CodeView,
+    		Footer,
+    		params,
+    		currentRoute
+    	});
 
     	$$self.$inject_state = $$props => {
     		if ('params' in $$props) $$invalidate(0, params = $$props.params);
@@ -2964,8 +6662,8 @@ var app = (function () {
 
     var ZingGrid$1 = ZingGrid;
 
-    /* src/components/Simple.svelte generated by Svelte v3.44.3 */
-    const file$9 = "src/components/Simple.svelte";
+    /* src/demos/Simple.svelte generated by Svelte v3.44.3 */
+    const file$9 = "src/demos/Simple.svelte";
 
     function create_fragment$9(ctx) {
     	let div;
@@ -3051,10 +6749,10 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Conditional.svelte generated by Svelte v3.44.3 */
+    /* src/demos/Conditional.svelte generated by Svelte v3.44.3 */
 
-    const { console: console_1$1 } = globals;
-    const file$8 = "src/components/Conditional.svelte";
+    const { console: console_1$2 } = globals;
+    const file$8 = "src/demos/Conditional.svelte";
 
     // (58:2) {:else}
     function create_else_block(ctx) {
@@ -3293,7 +6991,7 @@ var app = (function () {
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1$1.warn(`<Conditional> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1$2.warn(`<Conditional> was created with unknown prop '${key}'`);
     	});
 
     	const click_handler = () => $$invalidate(2, defaultColumns = !defaultColumns);
@@ -3333,8 +7031,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Events.svelte generated by Svelte v3.44.3 */
-    const file$7 = "src/components/Events.svelte";
+    /* src/demos/Events.svelte generated by Svelte v3.44.3 */
+    const file$7 = "src/demos/Events.svelte";
 
     function create_fragment$7(ctx) {
     	let div1;
@@ -3523,10 +7221,10 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Fetch.svelte generated by Svelte v3.44.3 */
+    /* src/demos/Fetch.svelte generated by Svelte v3.44.3 */
 
-    const { console: console_1 } = globals;
-    const file$6 = "src/components/Fetch.svelte";
+    const { console: console_1$1 } = globals;
+    const file$6 = "src/demos/Fetch.svelte";
 
     function create_fragment$6(ctx) {
     	let div;
@@ -3600,7 +7298,7 @@ var app = (function () {
     	const writable_props = [];
 
     	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1.warn(`<Fetch> was created with unknown prop '${key}'`);
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1$1.warn(`<Fetch> was created with unknown prop '${key}'`);
     	});
 
     	function zing_grid_binding($$value) {
@@ -3637,8 +7335,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Methods.svelte generated by Svelte v3.44.3 */
-    const file$5 = "src/components/Methods.svelte";
+    /* src/demos/Methods.svelte generated by Svelte v3.44.3 */
+    const file$5 = "src/demos/Methods.svelte";
 
     function create_fragment$5(ctx) {
     	let div1;
@@ -3807,8 +7505,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/OneWay.svelte generated by Svelte v3.44.3 */
-    const file$4 = "src/components/OneWay.svelte";
+    /* src/demos/OneWay.svelte generated by Svelte v3.44.3 */
+    const file$4 = "src/demos/OneWay.svelte";
 
     function create_fragment$4(ctx) {
     	let div1;
@@ -4175,8 +7873,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Register.svelte generated by Svelte v3.44.3 */
-    const file$3 = "src/components/Register.svelte";
+    /* src/demos/Register.svelte generated by Svelte v3.44.3 */
+    const file$3 = "src/demos/Register.svelte";
 
     function create_fragment$3(ctx) {
     	let div;
@@ -4327,8 +8025,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/Themes.svelte generated by Svelte v3.44.3 */
-    const file$2 = "src/components/Themes.svelte";
+    /* src/demos/Themes.svelte generated by Svelte v3.44.3 */
+    const file$2 = "src/demos/Themes.svelte";
 
     function create_fragment$2(ctx) {
     	let div;
@@ -4524,8 +8222,8 @@ var app = (function () {
     	}
     }
 
-    /* src/components/TwoWay.svelte generated by Svelte v3.44.3 */
-    const file$1 = "src/components/TwoWay.svelte";
+    /* src/demos/TwoWay.svelte generated by Svelte v3.44.3 */
+    const file$1 = "src/demos/TwoWay.svelte";
 
     function create_fragment$1(ctx) {
     	let div1;
@@ -4716,6 +8414,8 @@ var app = (function () {
     ];
 
     /* src/App.svelte generated by Svelte v3.44.3 */
+
+    const { Object: Object_1, console: console_1 } = globals;
     const file = "src/App.svelte";
 
     function create_fragment(ctx) {
@@ -4729,7 +8429,7 @@ var app = (function () {
     			div = element("div");
     			create_component(router.$$.fragment);
     			attr_dev(div, "class", "app svelte-15zgxtq");
-    			add_location(div, file, 5, 0, 95);
+    			add_location(div, file, 29, 0, 686);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -4767,15 +8467,54 @@ var app = (function () {
     }
 
     function instance($$self, $$props, $$invalidate) {
+    	let $version;
+    	let $pubDate;
+    	let $modules;
+    	validate_store(version, 'version');
+    	component_subscribe($$self, version, $$value => $$invalidate(0, $version = $$value));
+    	validate_store(pubDate, 'pubDate');
+    	component_subscribe($$self, pubDate, $$value => $$invalidate(1, $pubDate = $$value));
+    	validate_store(modules, 'modules');
+    	component_subscribe($$self, modules, $$value => $$invalidate(2, $modules = $$value));
     	let { $$slots: slots = {}, $$scope } = $$props;
     	validate_slots('App', slots, []);
+
+    	async function getCodeAndInfo() {
+    		try {
+    			for (let [path, mod] of Object.entries($modules)) {
+    				const resp = await fetch('code/' + mod.file);
+    				set_store_value(modules, $modules[path].code = await resp.text(), $modules);
+    			}
+
+    			const resp = await fetch('publish-info.json');
+    			const info = await resp.json();
+    			set_store_value(pubDate, $pubDate = info.date, $pubDate);
+    			set_store_value(version, $version = info.version, $version);
+    		} catch(err) {
+    			console.log(err);
+    		}
+    	}
+
+    	onMount(() => getCodeAndInfo());
     	const writable_props = [];
 
-    	Object.keys($$props).forEach(key => {
-    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console.warn(`<App> was created with unknown prop '${key}'`);
+    	Object_1.keys($$props).forEach(key => {
+    		if (!~writable_props.indexOf(key) && key.slice(0, 2) !== '$$' && key !== 'slot') console_1.warn(`<App> was created with unknown prop '${key}'`);
     	});
 
-    	$$self.$capture_state = () => ({ Router, routes });
+    	$$self.$capture_state = () => ({
+    		onMount,
+    		Router,
+    		routes,
+    		modules,
+    		pubDate,
+    		version,
+    		getCodeAndInfo,
+    		$version,
+    		$pubDate,
+    		$modules
+    	});
+
     	return [];
     }
 
@@ -4793,8 +8532,151 @@ var app = (function () {
     	}
     }
 
+    const blocks = '(if|else if|await|then|catch|each|html|debug)';
+
+    Prism.languages.svelte = Prism.languages.extend('markup', {
+    	each: {
+    		pattern: new RegExp(
+    			'{[#/]each' +
+    				'(?:(?:\\{(?:(?:\\{(?:[^{}])*\\})|(?:[^{}]))*\\})|(?:[^{}]))*}'
+    		),
+    		inside: {
+    			'language-javascript': [
+    				{
+    					pattern: /(as[\s\S]*)\([\s\S]*\)(?=\s*\})/,
+    					lookbehind: true,
+    					inside: Prism.languages['javascript'],
+    				},
+    				{
+    					pattern: /(as[\s]*)[\s\S]*(?=\s*)/,
+    					lookbehind: true,
+    					inside: Prism.languages['javascript'],
+    				},
+    				{
+    					pattern: /(#each[\s]*)[\s\S]*(?=as)/,
+    					lookbehind: true,
+    					inside: Prism.languages['javascript'],
+    				},
+    			],
+    			keyword: /[#/]each|as/,
+    			punctuation: /{|}/,
+    		},
+    	},
+    	block: {
+    		pattern: new RegExp(
+    			'{[#:/@]/s' +
+    				blocks +
+    				'(?:(?:\\{(?:(?:\\{(?:[^{}])*\\})|(?:[^{}]))*\\})|(?:[^{}]))*}'
+    		),
+    		inside: {
+    			punctuation: /^{|}$/,
+    			keyword: [new RegExp('[#:/@]' + blocks + '( )*'), /as/, /then/],
+    			'language-javascript': {
+    				pattern: /[\s\S]*/,
+    				inside: Prism.languages['javascript'],
+    			},
+    		},
+    	},
+    	tag: {
+    		pattern: /<\/?(?!\d)[^\s>\/=$<%]+(?:\s(?:\s*[^\s>\/=]+(?:\s*=\s*(?:(?:"[^"]*"|'[^']*'|[^\s'">=]+(?=[\s>]))|(?:"[^"]*"|'[^']*'|{[\s\S]+?}(?=[\s/>])))|(?=[\s/>])))+)?\s*\/?>/i,
+    		greedy: true,
+    		inside: {
+    			tag: {
+    				pattern: /^<\/?[^\s>\/]+/i,
+    				inside: {
+    					punctuation: /^<\/?/,
+    					namespace: /^[^\s>\/:]+:/,
+    				},
+    			},
+    			'language-javascript': {
+    				pattern: /\{(?:(?:\{(?:(?:\{(?:[^{}])*\})|(?:[^{}]))*\})|(?:[^{}]))*\}/,
+    				inside: Prism.languages['javascript'],
+    			},
+    			'attr-value': {
+    				pattern: /=\s*(?:"[^"]*"|'[^']*'|[^\s'">=]+)/i,
+    				inside: {
+    					punctuation: [
+    						/^=/,
+    						{
+    							pattern: /^(\s*)["']|["']$/,
+    							lookbehind: true,
+    						},
+    					],
+    					'language-javascript': {
+    						pattern: /{[\s\S]+}/,
+    						inside: Prism.languages['javascript'],
+    					},
+    				},
+    			},
+    			punctuation: /\/?>/,
+    			'attr-name': {
+    				pattern: /[^\s>\/]+/,
+    				inside: {
+    					namespace: /^[^\s>\/:]+:/,
+    				},
+    			},
+    		},
+    	},
+    	'language-javascript': {
+    		pattern: /\{(?:(?:\{(?:(?:\{(?:[^{}])*\})|(?:[^{}]))*\})|(?:[^{}]))*\}/,
+    		lookbehind: true,
+    		inside: Prism.languages['javascript'],
+    	},
+    });
+
+    Prism.languages.svelte['tag'].inside['attr-value'].inside['entity'] =
+    	Prism.languages.svelte['entity'];
+
+    Prism.hooks.add('wrap', env => {
+    	if (env.type === 'entity') {
+    		env.attributes['title'] = env.content.replace(/&amp;/, '&');
+    	}
+    });
+
+    Object.defineProperty(Prism.languages.svelte.tag, 'addInlined', {
+    	value: function addInlined(tagName, lang) {
+    		const includedCdataInside = {};
+    		includedCdataInside['language-' + lang] = {
+    			pattern: /(^<!\[CDATA\[)[\s\S]+?(?=\]\]>$)/i,
+    			lookbehind: true,
+    			inside: Prism.languages[lang],
+    		};
+    		includedCdataInside['cdata'] = /^<!\[CDATA\[|\]\]>$/i;
+
+    		const inside = {
+    			'included-cdata': {
+    				pattern: /<!\[CDATA\[[\s\S]*?\]\]>/i,
+    				inside: includedCdataInside,
+    			},
+    		};
+    		inside['language-' + lang] = {
+    			pattern: /[\s\S]+/,
+    			inside: Prism.languages[lang],
+    		};
+
+    		const def = {};
+    		def[tagName] = {
+    			pattern: RegExp(
+    				/(<__[\s\S]*?>)(?:<!\[CDATA\[[\s\S]*?\]\]>\s*|[\s\S])*?(?=<\/__>)/.source.replace(
+    					/__/g,
+    					tagName
+    				),
+    				'i'
+    			),
+    			lookbehind: true,
+    			greedy: true,
+    			inside,
+    		};
+
+    		Prism.languages.insertBefore('svelte', 'cdata', def);
+    	},
+    });
+
+    Prism.languages.svelte.tag.addInlined('style', 'css');
+    Prism.languages.svelte.tag.addInlined('script', 'javascript');
+
     const app = new App({
-    	target: document.body
+    	target: document.body,
     });
 
     return app;

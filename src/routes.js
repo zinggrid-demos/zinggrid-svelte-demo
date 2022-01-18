@@ -1,13 +1,13 @@
 import MainLayout from './layouts/layout.svelte'
-import Simple from './components/Simple.svelte'
-import Conditional from './components/Conditional.svelte'
-import Events from './components/Events.svelte'
-import Fetch from './components/Fetch.svelte'
-import Methods from './components/Methods.svelte'
-import OneWay from './components/OneWay.svelte'
-import Register from './components/Register.svelte'
-import Themes from './components/Themes.svelte'
-import TwoWay from './components/TwoWay.svelte'
+import Simple from './demos/Simple.svelte'
+import Conditional from './demos/Conditional.svelte'
+import Events from './demos/Events.svelte'
+import Fetch from './demos/Fetch.svelte'
+import Methods from './demos/Methods.svelte'
+import OneWay from './demos/OneWay.svelte'
+import Register from './demos/Register.svelte'
+import Themes from './demos/Themes.svelte'
+import TwoWay from './demos/TwoWay.svelte'
 
 const routes = [
 	{name: '/', component: Simple, layout: MainLayout},

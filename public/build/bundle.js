@@ -7514,49 +7514,49 @@ var app = (function () {
     			set_custom_element_data(zg_column0, "index", "id");
     			zg_column0.hidden = true;
     			set_custom_element_data(zg_column0, "editor", "disabled");
-    			add_location(zg_column0, file$6, 75, 3, 1817);
+    			add_location(zg_column0, file$6, 75, 3, 1822);
     			set_custom_element_data(zg_column1, "index", "title");
     			set_custom_element_data(zg_column1, "header", "Series Title");
-    			add_location(zg_column1, file$6, 76, 3, 1880);
+    			add_location(zg_column1, file$6, 76, 3, 1885);
     			set_custom_element_data(zg_column2, "index", "seasons");
     			set_custom_element_data(zg_column2, "header", "# of Seasons");
     			set_custom_element_data(zg_column2, "type", "number");
-    			add_location(zg_column2, file$6, 77, 3, 1943);
+    			add_location(zg_column2, file$6, 77, 3, 1948);
     			set_custom_element_data(zg_column3, "index", "provider");
     			set_custom_element_data(zg_column3, "header", "Provider or Channel");
-    			add_location(zg_column3, file$6, 78, 3, 2022);
+    			add_location(zg_column3, file$6, 78, 3, 2027);
     			set_custom_element_data(zg_column4, "index", "genre");
     			set_custom_element_data(zg_column4, "header", "Genre");
-    			add_location(zg_column4, file$6, 79, 3, 2095);
-    			add_location(zg_colgroup, file$6, 74, 2, 1800);
+    			add_location(zg_column4, file$6, 79, 3, 2100);
+    			add_location(zg_colgroup, file$6, 74, 2, 1805);
     			set_custom_element_data(zg_param0, "name", "recordPath");
     			set_custom_element_data(zg_param0, "value", "data.shows");
-    			add_location(zg_param0, file$6, 82, 3, 2215);
+    			add_location(zg_param0, file$6, 82, 3, 2220);
     			set_custom_element_data(zg_param1, "name", "readBody");
     			set_custom_element_data(zg_param1, "value", /*readBodyJSON*/ ctx[0]);
-    			add_location(zg_param1, file$6, 83, 3, 2277);
+    			add_location(zg_param1, file$6, 83, 3, 2282);
     			set_custom_element_data(zg_param2, "name", "createBody");
     			set_custom_element_data(zg_param2, "value", /*createBodyJSON*/ ctx[1]);
-    			add_location(zg_param2, file$6, 84, 3, 2339);
+    			add_location(zg_param2, file$6, 84, 3, 2344);
     			set_custom_element_data(zg_param3, "name", "updateRowBody");
     			set_custom_element_data(zg_param3, "value", /*updateRowBodyJSON*/ ctx[2]);
-    			add_location(zg_param3, file$6, 85, 3, 2405);
+    			add_location(zg_param3, file$6, 85, 3, 2410);
     			set_custom_element_data(zg_param4, "name", "updateCellBody");
     			set_custom_element_data(zg_param4, "value", /*updateCellBodyJSON*/ ctx[3]);
-    			add_location(zg_param4, file$6, 86, 3, 2477);
+    			add_location(zg_param4, file$6, 86, 3, 2482);
     			set_custom_element_data(zg_param5, "name", "deleteBody");
     			set_custom_element_data(zg_param5, "value", /*deleteBodyJSON*/ ctx[4]);
-    			add_location(zg_param5, file$6, 87, 3, 2551);
+    			add_location(zg_param5, file$6, 87, 3, 2556);
     			if (!src_url_equal(zg_data.src, zg_data_src_value = demoServer)) set_custom_element_data(zg_data, "src", zg_data_src_value);
     			set_custom_element_data(zg_data, "adapter", "graphql");
-    			add_location(zg_data, file$6, 81, 2, 2167);
+    			add_location(zg_data, file$6, 81, 2, 2172);
     			set_custom_element_data(zing_grid, "context-menu", "");
     			set_custom_element_data(zing_grid, "caption", "GraphQL CRUD Demo");
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "editor-controls", "");
-    			add_location(zing_grid, file$6, 73, 1, 1704);
+    			add_location(zing_grid, file$6, 73, 1, 1709);
     			attr_dev(div, "class", "Grid-wrapper");
-    			add_location(div, file$6, 72, 0, 1676);
+    			add_location(div, file$6, 72, 0, 1681);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -7607,7 +7607,7 @@ var app = (function () {
     	return block;
     }
 
-    const demoServer = 'http://maya:4000/graphql';
+    const demoServer = 'http://localhost:4000/graphql';
 
     function instance$6($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;

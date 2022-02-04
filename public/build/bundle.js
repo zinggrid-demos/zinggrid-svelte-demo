@@ -2435,7 +2435,7 @@ var app = (function () {
     	'/graphql-crud': {
     		label: 'GraphQL CRUD',
     		text: 'Demonstrates reading and writing grid data from a GraphQL server',
-    		info: "This example demonstrates full GraphQL Create/Read/Update/Delete support by specifying all 5 queries/mutations. If you're not able to access the public server, see the `server` directory in this repo for instructions on running it locally.",
+        info: "This example demonstrates full GraphQL Create/Read/Update/Delete support by specifying all 5 queries/mutations. We access a public GraphQL server where the database is reset every hour on the hour.",
     		file: 'GraphQL-crud.svelte',
     		code: ''
     	},
@@ -7514,49 +7514,49 @@ var app = (function () {
     			set_custom_element_data(zg_column0, "index", "id");
     			zg_column0.hidden = true;
     			set_custom_element_data(zg_column0, "editor", "disabled");
-    			add_location(zg_column0, file$6, 75, 3, 1822);
+    			add_location(zg_column0, file$6, 73, 3, 1838);
     			set_custom_element_data(zg_column1, "index", "title");
     			set_custom_element_data(zg_column1, "header", "Series Title");
-    			add_location(zg_column1, file$6, 76, 3, 1885);
+    			add_location(zg_column1, file$6, 74, 3, 1901);
     			set_custom_element_data(zg_column2, "index", "seasons");
     			set_custom_element_data(zg_column2, "header", "# of Seasons");
     			set_custom_element_data(zg_column2, "type", "number");
-    			add_location(zg_column2, file$6, 77, 3, 1948);
+    			add_location(zg_column2, file$6, 75, 3, 1964);
     			set_custom_element_data(zg_column3, "index", "provider");
     			set_custom_element_data(zg_column3, "header", "Provider or Channel");
-    			add_location(zg_column3, file$6, 78, 3, 2027);
+    			add_location(zg_column3, file$6, 76, 3, 2043);
     			set_custom_element_data(zg_column4, "index", "genre");
     			set_custom_element_data(zg_column4, "header", "Genre");
-    			add_location(zg_column4, file$6, 79, 3, 2100);
-    			add_location(zg_colgroup, file$6, 74, 2, 1805);
+    			add_location(zg_column4, file$6, 77, 3, 2116);
+    			add_location(zg_colgroup, file$6, 72, 2, 1821);
     			set_custom_element_data(zg_param0, "name", "recordPath");
     			set_custom_element_data(zg_param0, "value", "data.shows");
-    			add_location(zg_param0, file$6, 82, 3, 2220);
+    			add_location(zg_param0, file$6, 80, 3, 2236);
     			set_custom_element_data(zg_param1, "name", "readBody");
     			set_custom_element_data(zg_param1, "value", /*readBodyJSON*/ ctx[0]);
-    			add_location(zg_param1, file$6, 83, 3, 2282);
+    			add_location(zg_param1, file$6, 81, 3, 2298);
     			set_custom_element_data(zg_param2, "name", "createBody");
     			set_custom_element_data(zg_param2, "value", /*createBodyJSON*/ ctx[1]);
-    			add_location(zg_param2, file$6, 84, 3, 2344);
+    			add_location(zg_param2, file$6, 82, 3, 2360);
     			set_custom_element_data(zg_param3, "name", "updateRowBody");
     			set_custom_element_data(zg_param3, "value", /*updateRowBodyJSON*/ ctx[2]);
-    			add_location(zg_param3, file$6, 85, 3, 2410);
+    			add_location(zg_param3, file$6, 83, 3, 2426);
     			set_custom_element_data(zg_param4, "name", "updateCellBody");
     			set_custom_element_data(zg_param4, "value", /*updateCellBodyJSON*/ ctx[3]);
-    			add_location(zg_param4, file$6, 86, 3, 2482);
+    			add_location(zg_param4, file$6, 84, 3, 2498);
     			set_custom_element_data(zg_param5, "name", "deleteBody");
     			set_custom_element_data(zg_param5, "value", /*deleteBodyJSON*/ ctx[4]);
-    			add_location(zg_param5, file$6, 87, 3, 2556);
+    			add_location(zg_param5, file$6, 85, 3, 2572);
     			if (!src_url_equal(zg_data.src, zg_data_src_value = demoServer)) set_custom_element_data(zg_data, "src", zg_data_src_value);
     			set_custom_element_data(zg_data, "adapter", "graphql");
-    			add_location(zg_data, file$6, 81, 2, 2172);
+    			add_location(zg_data, file$6, 79, 2, 2188);
     			set_custom_element_data(zing_grid, "context-menu", "");
     			set_custom_element_data(zing_grid, "caption", "GraphQL CRUD Demo");
     			set_custom_element_data(zing_grid, "head-class", "grid-header");
     			set_custom_element_data(zing_grid, "editor-controls", "");
-    			add_location(zing_grid, file$6, 73, 1, 1709);
+    			add_location(zing_grid, file$6, 71, 1, 1725);
     			attr_dev(div, "class", "Grid-wrapper");
-    			add_location(div, file$6, 72, 0, 1681);
+    			add_location(div, file$6, 70, 0, 1697);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -7607,7 +7607,7 @@ var app = (function () {
     	return block;
     }
 
-    const demoServer = 'http://localhost:4000/graphql';
+    const demoServer = 'https://examples.zingsoft.com/graphql';
 
     function instance$6($$self, $$props, $$invalidate) {
     	let { $$slots: slots = {}, $$scope } = $$props;

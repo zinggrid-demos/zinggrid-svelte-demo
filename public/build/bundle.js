@@ -6768,7 +6768,7 @@ var app = (function () {
     const { console: console_1$2 } = globals;
     const file$a = "src/demos/Conditional.svelte";
 
-    // (58:2) {:else}
+    // (52:2) {:else}
     function create_else_block(ctx) {
     	let zg_colgroup;
     	let zg_column0;
@@ -6782,10 +6782,10 @@ var app = (function () {
     			t = space();
     			zg_column1 = element("zg-column");
     			set_custom_element_data(zg_column0, "index", "titleChanged");
-    			add_location(zg_column0, file$a, 59, 4, 1344);
+    			add_location(zg_column0, file$a, 53, 4, 1089);
     			set_custom_element_data(zg_column1, "index", "genreChanged");
-    			add_location(zg_column1, file$a, 60, 4, 1383);
-    			add_location(zg_colgroup, file$a, 58, 3, 1326);
+    			add_location(zg_column1, file$a, 54, 4, 1128);
+    			add_location(zg_colgroup, file$a, 52, 3, 1071);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, zg_colgroup, anchor);
@@ -6802,14 +6802,14 @@ var app = (function () {
     		block,
     		id: create_else_block.name,
     		type: "else",
-    		source: "(58:2) {:else}",
+    		source: "(52:2) {:else}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (53:2) {#if defaultColumns}
+    // (47:2) {#if defaultColumns}
     function create_if_block(ctx) {
     	let zg_colgroup;
     	let zg_column0;
@@ -6823,10 +6823,10 @@ var app = (function () {
     			t = space();
     			zg_column1 = element("zg-column");
     			set_custom_element_data(zg_column0, "index", "title");
-    			add_location(zg_column0, file$a, 54, 4, 1235);
+    			add_location(zg_column0, file$a, 48, 4, 980);
     			set_custom_element_data(zg_column1, "index", "genre");
-    			add_location(zg_column1, file$a, 55, 4, 1267);
-    			add_location(zg_colgroup, file$a, 53, 3, 1217);
+    			add_location(zg_column1, file$a, 49, 4, 1012);
+    			add_location(zg_colgroup, file$a, 47, 3, 962);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, zg_colgroup, anchor);
@@ -6843,7 +6843,7 @@ var app = (function () {
     		block,
     		id: create_if_block.name,
     		type: "if",
-    		source: "(53:2) {#if defaultColumns}",
+    		source: "(47:2) {#if defaultColumns}",
     		ctx
     	});
 
@@ -6852,17 +6852,12 @@ var app = (function () {
 
     function create_fragment$a(ctx) {
     	let div;
-    	let p;
+    	let button;
     	let t0;
-    	let code;
+    	let t1_value = (/*defaultColumns*/ ctx[2] ? " Second " : " First ") + "";
+    	let t1;
     	let t2;
     	let t3;
-    	let button;
-    	let t4;
-    	let t5_value = (/*defaultColumns*/ ctx[2] ? " Second " : " First ") + "";
-    	let t5;
-    	let t6;
-    	let t7;
     	let zing_grid;
     	let zing_grid_data_value;
     	let zing_grid_caption_value;
@@ -6880,22 +6875,14 @@ var app = (function () {
     	const block = {
     		c: function create() {
     			div = element("div");
-    			p = element("p");
-    			t0 = text("You can dynamically render ");
-    			code = element("code");
-    			code.textContent = "zg-column";
-    			t2 = text("s in your code and\n\t\tZingGrid will automatically pick up the mutation and adjust the layout\n\t\tof columns being displayed. This is good for displaying a single grid\n\t\tshowing multiple datasets.");
-    			t3 = space();
     			button = element("button");
-    			t4 = text("Switch to\n\t\t");
-    			t5 = text(t5_value);
-    			t6 = text("\n\t\tDataset");
-    			t7 = space();
+    			t0 = text("Switch to\n\t\t");
+    			t1 = text(t1_value);
+    			t2 = text("\n\t\tDataset");
+    			t3 = space();
     			zing_grid = element("zing-grid");
     			if_block.c();
-    			add_location(code, file$a, 31, 29, 619);
-    			add_location(p, file$a, 30, 1, 586);
-    			add_location(button, file$a, 36, 1, 841);
+    			add_location(button, file$a, 30, 1, 586);
 
     			set_custom_element_data(zing_grid, "data", zing_grid_data_value = /*defaultColumns*/ ctx[2]
     			? /*data1*/ ctx[0]
@@ -6909,7 +6896,7 @@ var app = (function () {
     			set_custom_element_data(zing_grid, "viewport-stop", "");
     			set_custom_element_data(zing_grid, "pager", true);
     			set_custom_element_data(zing_grid, "page-size", "5");
-    			add_location(zing_grid, file$a, 41, 1, 978);
+    			add_location(zing_grid, file$a, 35, 1, 723);
     			attr_dev(div, "class", "Grid-wrapper");
     			add_location(div, file$a, 29, 0, 558);
     		},
@@ -6918,16 +6905,11 @@ var app = (function () {
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, div, anchor);
-    			append_dev(div, p);
-    			append_dev(p, t0);
-    			append_dev(p, code);
-    			append_dev(p, t2);
-    			append_dev(div, t3);
     			append_dev(div, button);
-    			append_dev(button, t4);
-    			append_dev(button, t5);
-    			append_dev(button, t6);
-    			append_dev(div, t7);
+    			append_dev(button, t0);
+    			append_dev(button, t1);
+    			append_dev(button, t2);
+    			append_dev(div, t3);
     			append_dev(div, zing_grid);
     			if_block.m(zing_grid, null);
 
@@ -6937,7 +6919,7 @@ var app = (function () {
     			}
     		},
     		p: function update(ctx, [dirty]) {
-    			if (dirty & /*defaultColumns*/ 4 && t5_value !== (t5_value = (/*defaultColumns*/ ctx[2] ? " Second " : " First ") + "")) set_data_dev(t5, t5_value);
+    			if (dirty & /*defaultColumns*/ 4 && t1_value !== (t1_value = (/*defaultColumns*/ ctx[2] ? " Second " : " First ") + "")) set_data_dev(t1, t1_value);
 
     			if (current_block_type !== (current_block_type = select_block_type(ctx))) {
     				if_block.d(1);

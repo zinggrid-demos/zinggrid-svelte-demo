@@ -28,12 +28,6 @@
 </script>
 
 <div class="Grid-wrapper">
-	<p>
-		You can dynamically render <code>zg-column</code>s in your code and
-		ZingGrid will automatically pick up the mutation and adjust the layout
-		of columns being displayed. This is good for displaying a single grid
-		showing multiple datasets.
-	</p>
 	<button on:click={() => defaultColumns = !defaultColumns}>
 		Switch to
 		{defaultColumns ? " Second " : " First "}
